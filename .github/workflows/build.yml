@@ -5,16 +5,18 @@ name: Build and publish per-world module-install branch
 #   on: { release: { types: [published] }, workflow_dispatch: {} }
 #   jobs:
 #     publish:
-#       uses: MultiworldGG/build-and-publish-action/.github/workflows/build.yml@v1
+#       uses: MultiworldGG/build-and-publish-action/.github/workflows/build.yml@v2
 #       with:
 #         slug: oot
 #       secrets:
-#         INDEX_PR_TOKEN: ${{ secrets.MWGG_INDEX_PR_TOKEN }}
+#         OLIVER_APP_ID:      ${{ secrets.MWGG_OLIVER_APP_ID }}
+#         OLIVER_PRIVATE_KEY: ${{ secrets.MWGG_OLIVER_PRIVATE_KEY }}
 #
 # Builds the world from the caller repo's worlds/<slug>/ subtree, force-pushes a
 # `module-install` orphan branch on the caller repo, tags it immutably as
 # `module-install/<world_version>`, and opens a PR against MultiworldGG-Index
-# updating worlds/<slug>.json's module_location.
+# updating worlds/<slug>.json's module_location. The Index PR is opened by the
+# Oliver GitHub App, using a short-lived installation token minted at run time.
 
 on:
   workflow_call:
@@ -53,12 +55,16 @@ on:
         type: boolean
         default: false
     secrets:
-      INDEX_PR_TOKEN:
+      OLIVER_APP_ID:
         description: |
-          PAT or GitHub-App installation token with contents:write +
-          pull-requests:write on the Index repo. Used to clone, push the
-          PR branch, and open the cross-repo PR. Caller repo's GITHUB_TOKEN
-          handles the orphan-branch push to the caller's own repo.
+          GitHub App ID for the Oliver bot (Index PR opener). The App must be
+          installed on the Index repo with contents:write + pull-requests:write.
+          The action mints a 1-hour installation token at runtime.
+        required: true
+      OLIVER_PRIVATE_KEY:
+        description: |
+          PEM-formatted private key for the Oliver GitHub App. Pass the entire
+          file contents including BEGIN/END lines.
         required: true
 
 permissions:
@@ -159,17 +165,31 @@ jobs:
           ALLOW_TAG_REUSE: ${{ inputs.allow-tag-reuse && '1' || '0' }}
         run: bash .build-and-publish-action/scripts/push_module_install.sh
 
+      - name: Mint Oliver installation token
+        id: oliver
+        if: ${{ !inputs.dry-run }}
+        # Hardcoded to the canonical Index repo so the minted installation
+        # token is scoped to that repo only. `inputs.index-repo` overrides
+        # used for testing forks won't carry through here — testing forks
+        # need their own GitHub App installation.
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.OLIVER_APP_ID }}
+          private-key: ${{ secrets.OLIVER_PRIVATE_KEY }}
+          owner: lallaria
+          repositories: MultiworldGG-Index
+
       - name: Open Index PR
         if: ${{ !inputs.dry-run }}
         env:
-          INDEX_PR_TOKEN: ${{ secrets.INDEX_PR_TOKEN }}
+          INDEX_PR_TOKEN: ${{ steps.oliver.outputs.token }}
           INDEX_REPO: ${{ inputs.index-repo }}
           CALLER_REPO: ${{ github.repository }}
           WORLD_SLUG: ${{ inputs.slug }}
           WORLD_VERSION: ${{ steps.shape.outputs.world_version }}
           TAG_NAME: ${{ steps.push.outputs.tag }}
-          GIT_USER_NAME: github-actions[bot]
-          GIT_USER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_USER_NAME: ${{ steps.oliver.outputs.app-slug }}[bot]
+          GIT_USER_EMAIL: ${{ steps.oliver.outputs.app-slug }}[bot]@users.noreply.github.com
         run: python .build-and-publish-action/scripts/open_index_pr.py
 
       - name: Dry-run summary
