@@ -10,7 +10,7 @@ world, this action:
 5. Opens a PR against [MultiworldGG-Index](https://github.com/lallaria/MultiworldGG-Index)
    updating your world's `module_location` to the new tag URL
 
-The Index PR triggers Greg's 7-check security review automatically.
+The Index PR triggers Karen's 7-check security review automatically.
 
 ## Quick start (caller workflow)
 
@@ -25,18 +25,23 @@ on:
 
 jobs:
   publish:
-    uses: MultiworldGG/build-and-publish-action/.github/workflows/build.yml@v1
+    uses: MultiworldGG/build-and-publish-action/.github/workflows/build.yml@v2
     with:
       slug: oot          # ← your world's slug (filename stem, lowercase, snake_case)
     secrets:
-      INDEX_PR_TOKEN: ${{ secrets.MWGG_INDEX_PR_TOKEN }}
+      OLIVER_APP_ID:      ${{ secrets.MWGG_OLIVER_APP_ID }}
+      OLIVER_PRIVATE_KEY: ${{ secrets.MWGG_OLIVER_PRIVATE_KEY }}
 ```
 
-Then add a single repo Secret:
+Then add two repo Secrets pointing at the **Oliver** GitHub App
+(installed by MultiworldGG admins on `lallaria/MultiworldGG-Index`):
 
-- **`MWGG_INDEX_PR_TOKEN`** — fine-grained PAT (or GitHub App installation token)
-  with **Contents: Write** + **Pull requests: Write** on
-  [`lallaria/MultiworldGG-Index`](https://github.com/lallaria/MultiworldGG-Index).
+- **`MWGG_OLIVER_APP_ID`** — Oliver App's numeric ID.
+- **`MWGG_OLIVER_PRIVATE_KEY`** — full PEM contents (BEGIN/END lines included)
+  of Oliver's private key.
+
+The action mints a 1-hour installation token at runtime, scoped to the Index
+repo only — no long-lived PATs are stored anywhere.
 
 ## Repo layout requirement
 

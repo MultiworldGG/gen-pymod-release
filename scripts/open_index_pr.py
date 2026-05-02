@@ -8,7 +8,7 @@ Workflow:
      (matches what Phase-1 backfill produced).
   4. Push to a fresh branch update/<slug>-<world_version> on the Index repo.
   5. `gh pr create` against main, body uses the manifest_update.md template
-     contents inline + the Greg checks happen automatically once the PR opens.
+     contents inline + the Karen checks happen automatically once the PR opens.
   6. If a PR already exists for this branch, just update the head and let the
      CI re-trigger. If a PR exists for an *older* version of this slug, leave
      it alone — the new one supersedes it but cleaning up old PRs is outside
@@ -128,9 +128,9 @@ def main() -> int:
         f"- **Source tag:** [`{tag}`](https://github.com/{caller_repo}/tree/{tag})\n"
         f"- **New `module_location`:** `{new_module_location}`\n"
         f"\n"
-        f"## Greg's review\n"
+        f"## Karen's review\n"
         f"\n"
-        f"Greg's PR-review workflow will post a sticky comment with the 7-check result.\n"
+        f"Karen's PR-review workflow will post a sticky comment with the 7-check result.\n"
         f"If any check fails, fix the underlying issue in the source repo, bump\n"
         f"`world_version`, and re-publish — this PR will be superseded by the new version.\n"
     )
