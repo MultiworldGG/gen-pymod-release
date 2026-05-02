@@ -1,0 +1,180 @@
+name: Build and publish per-world module-install branch
+
+# Reusable workflow. Invoked by per-world repos like:
+#
+#   on: { release: { types: [published] }, workflow_dispatch: {} }
+#   jobs:
+#     publish:
+#       uses: MultiworldGG/build-and-publish-action/.github/workflows/build.yml@v1
+#       with:
+#         slug: oot
+#       secrets:
+#         INDEX_PR_TOKEN: ${{ secrets.MWGG_INDEX_PR_TOKEN }}
+#
+# Builds the world from the caller repo's worlds/<slug>/ subtree, force-pushes a
+# `module-install` orphan branch on the caller repo, tags it immutably as
+# `module-install/<world_version>`, and opens a PR against MultiworldGG-Index
+# updating worlds/<slug>.json's module_location.
+
+on:
+  workflow_call:
+    inputs:
+      slug:
+        description: World slug (filename stem of worlds/<slug>/)
+        required: true
+        type: string
+      source-ref:
+        description: |
+          Git ref of the caller repo to build from. Defaults to the release tag
+          (when triggered by `release: published`) or the current SHA otherwise.
+        required: false
+        type: string
+        default: ""
+      index-repo:
+        description: Index repo to PR against (override for testing/forks)
+        required: false
+        type: string
+        default: lallaria/MultiworldGG-Index
+      dry-run:
+        description: Skip orphan push + Index PR; just shape and validate.
+        required: false
+        type: boolean
+        default: false
+      pip-build-check:
+        description: Run `python -m build` against the shaped tree to catch errors before push.
+        required: false
+        type: boolean
+        default: true
+      allow-tag-reuse:
+        description: |
+          Allow re-publishing the existing tag if (and only if) the new commit SHA
+          would be identical. Default false — any tag-reuse fails hard.
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      INDEX_PR_TOKEN:
+        description: |
+          PAT or GitHub-App installation token with contents:write +
+          pull-requests:write on the Index repo. Used to clone, push the
+          PR branch, and open the cross-repo PR. Caller repo's GITHUB_TOKEN
+          handles the orphan-branch push to the caller's own repo.
+        required: true
+
+permissions:
+  contents: write   # for orphan-branch + tag push to the caller repo
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Resolve source ref
+        id: ref
+        env:
+          INPUT_REF: ${{ inputs.source-ref }}
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          CTX_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_REF}" ]; then
+            ref="${INPUT_REF}"
+          elif [ "${EVENT_NAME}" = "release" ] && [ -n "${RELEASE_TAG}" ]; then
+            ref="${RELEASE_TAG}"
+          else
+            ref="${CTX_SHA}"
+          fi
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+          echo "Resolved source-ref: ${ref}"
+
+      - name: Checkout caller repo at source-ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ref.outputs.ref }}
+          fetch-depth: 1
+
+      - name: Checkout build-and-publish-action (for scripts/templates)
+        # github.workflow_sha pins to the exact commit of the reusable workflow
+        # the caller invoked. Without this, scripts could drift from the YAML.
+        uses: actions/checkout@v4
+        with:
+          repository: MultiworldGG/build-and-publish-action
+          ref: ${{ github.workflow_sha }}
+          path: .build-and-publish-action
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build-time deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install tomli_w build
+
+      - name: Shape orphan tree
+        id: shape
+        run: |
+          set -euo pipefail
+          python .build-and-publish-action/scripts/shape_orphan.py \
+            --source-root . \
+            --slug "${{ inputs.slug }}" \
+            --templates-dir .build-and-publish-action/templates \
+            --output-dir .orphan-tree \
+            --caller-repo "${{ github.repository }}" \
+            --source-ref "${{ steps.ref.outputs.ref }}"
+          # Read world_version from the same archipelago.json the script just used.
+          world_version=$(python -c "
+          import json, sys
+          d = json.load(open('worlds/${{ inputs.slug }}/archipelago.json', encoding='utf-8'))
+          print(d['world_version'])
+          ")
+          echo "world_version=${world_version}" >> "$GITHUB_OUTPUT"
+          echo "World version: ${world_version}"
+
+      - name: pip build sanity check
+        if: inputs.pip-build-check
+        run: |
+          set -euo pipefail
+          (cd .orphan-tree && python -m build --wheel)
+          ls -la .orphan-tree/dist/
+
+      - name: Push module-install branch + tag (caller repo)
+        id: push
+        if: ${{ !inputs.dry-run }}
+        env:
+          ORPHAN_TREE: ${{ github.workspace }}/.orphan-tree
+          WORLD_VERSION: ${{ steps.shape.outputs.world_version }}
+          WORLD_SLUG: ${{ inputs.slug }}
+          CALLER_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMIT_MESSAGE: |
+            module-install: ${{ inputs.slug }} ${{ steps.shape.outputs.world_version }}
+
+            Built from ${{ steps.ref.outputs.ref }} by MultiworldGG/build-and-publish-action.
+          GIT_USER_NAME: github-actions[bot]
+          GIT_USER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          ALLOW_TAG_REUSE: ${{ inputs.allow-tag-reuse && '1' || '0' }}
+        run: bash .build-and-publish-action/scripts/push_module_install.sh
+
+      - name: Open Index PR
+        if: ${{ !inputs.dry-run }}
+        env:
+          INDEX_PR_TOKEN: ${{ secrets.INDEX_PR_TOKEN }}
+          INDEX_REPO: ${{ inputs.index-repo }}
+          CALLER_REPO: ${{ github.repository }}
+          WORLD_SLUG: ${{ inputs.slug }}
+          WORLD_VERSION: ${{ steps.shape.outputs.world_version }}
+          TAG_NAME: ${{ steps.push.outputs.tag }}
+          GIT_USER_NAME: github-actions[bot]
+          GIT_USER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: python .build-and-publish-action/scripts/open_index_pr.py
+
+      - name: Dry-run summary
+        if: inputs.dry-run
+        run: |
+          echo "::notice::dry-run mode: shaped tree is at .orphan-tree/, but nothing pushed."
+          echo "World: ${{ inputs.slug }}@${{ steps.shape.outputs.world_version }}"
+          echo "Source ref: ${{ steps.ref.outputs.ref }}"

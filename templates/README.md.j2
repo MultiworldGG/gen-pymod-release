@@ -1,0 +1,40 @@
+# worlds.{{ slug }} — module-install branch
+
+This is an **orphan branch** auto-built by [MultiworldGG/build-and-publish-action](https://github.com/MultiworldGG/build-and-publish-action).
+It contains a pip-installable layout of the `{{ slug }}` world from this repo.
+
+- **World:** {{ game_name }}
+- **Version:** {{ world_version }}
+- **Source ref:** `{{ source_ref }}`
+- **Built:** {{ built_at }}
+
+## Install
+
+```
+pip install git+https://github.com/{{ caller_repo }}.git@module-install/{{ world_version }}
+```
+
+After install, `worlds.{{ slug }}` is importable in any environment that has the
+MultiworldGG worlds-namespace stub installed (the monorepo provides it).
+
+## How this branch is structured
+
+```
+pyproject.toml
+src/
+  worlds/
+    {{ slug }}/
+      ...the world's Python source...
+```
+
+This is a pip-installable [namespace-package](https://peps.python.org/pep-0420/)
+contribution under the shared `worlds.` namespace. It coexists with all other
+per-world install branches because none of them ship `worlds/__init__.py`.
+
+## Important
+
+- This branch is force-pushed on every release of this world.
+- The `module-install/{{ world_version }}` **tag** is immutable — pin to it
+  for reproducibility. Pinning to the branch tip (`module-install`) gets the
+  latest published version.
+- Source for this build lives at `{{ source_ref }}` on the default branch.
