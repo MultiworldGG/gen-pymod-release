@@ -1,0 +1,25 @@
+# Auto-generated fallback pyproject.toml.
+# This template is only used when the per-world repo does NOT ship
+# `worlds/{{ slug }}/pyproject.toml` of its own. If the maintainer ships one,
+# it is used as-is (with `version` and `authors` injected from archipelago.json
+# if missing) — see scripts/shape_orphan.py.
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "worlds.{{ slug }}"
+version = "{{ world_version }}"
+description = "MultiWorld: {{ game_name }}"
+classifiers = ["Private :: Do Not Upload"]
+requires-python = ">=3.12"
+{% for author in authors %}
+[[project.authors]]
+name = "{{ author }}"
+
+{% endfor %}
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["worlds.{{ slug }}"]
+namespaces = true
