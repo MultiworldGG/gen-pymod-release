@@ -1,30 +1,23 @@
-name: Build and publish per-world module-install branch
+name: Build and publish per-world wheel branch
 
 # Reusable workflow. Invoked by per-world repos like:
 #
 #   on: { release: { types: [published] }, workflow_dispatch: {} }
 #   jobs:
 #     publish:
-#       uses: MultiworldGG/build-and-publish-action/.github/workflows/build.yml@v2
-#       with:
-#         slug: oot
-#       secrets:
-#         OLIVER_APP_ID:      ${{ secrets.MWGG_OLIVER_APP_ID }}
-#         OLIVER_PRIVATE_KEY: ${{ secrets.MWGG_OLIVER_PRIVATE_KEY }}
+#       uses: MultiworldGG/build-and-publish-action/.github/workflows/build.yml@v3
+#       # No `with:` — slug comes from vars.WORLD_FOLDER_NAME
+#       # No `secrets:` — no Oliver secrets needed
 #
 # Builds the world from the caller repo's worlds/<slug>/ subtree, force-pushes a
-# `module-install` orphan branch on the caller repo, tags it immutably as
-# `module-install/<world_version>`, and opens a PR against MultiworldGG-Index
-# updating worlds/<slug>.json's module_location. The Index PR is opened by the
-# Oliver GitHub App, using a short-lived installation token minted at run time.
+# `wheel/worlds/<slug>` orphan branch on the caller repo, and tags it immutably
+# as `wheel/worlds/<slug>/<world_version>`. The matching Index PR is opened
+# separately by the Oliver-Multiworld-Squirrel GitHub App when it sees the
+# workflow_run.completed event from this workflow.
 
 on:
   workflow_call:
     inputs:
-      slug:
-        description: World slug (filename stem of worlds/<slug>/)
-        required: true
-        type: string
       source-ref:
         description: |
           Git ref of the caller repo to build from. Defaults to the release tag
@@ -32,13 +25,8 @@ on:
         required: false
         type: string
         default: ""
-      index-repo:
-        description: Index repo to PR against (override for testing/forks)
-        required: false
-        type: string
-        default: lallaria/MultiworldGG-Index
       dry-run:
-        description: Skip orphan push + Index PR; just shape and validate.
+        description: Skip orphan push; just shape and validate.
         required: false
         type: boolean
         default: false
@@ -54,18 +42,6 @@ on:
         required: false
         type: boolean
         default: false
-    secrets:
-      OLIVER_APP_ID:
-        description: |
-          GitHub App ID for the Oliver bot (Index PR opener). The App must be
-          installed on the Index repo with contents:write + pull-requests:write.
-          The action mints a 1-hour installation token at runtime.
-        required: true
-      OLIVER_PRIVATE_KEY:
-        description: |
-          PEM-formatted private key for the Oliver GitHub App. Pass the entire
-          file contents including BEGIN/END lines.
-        required: true
 
 permissions:
   contents: write   # for orphan-branch + tag push to the caller repo
@@ -76,6 +52,20 @@ jobs:
     timeout-minutes: 20
 
     steps:
+      - name: Resolve slug from repo variable
+        id: slug
+        env:
+          WORLD_FOLDER_NAME: ${{ vars.WORLD_FOLDER_NAME }}
+        run: |
+          set -euo pipefail
+          if [ -z "${WORLD_FOLDER_NAME}" ]; then
+            echo "::error::Repository variable WORLD_FOLDER_NAME is not set."
+            echo "Set it in Settings → Secrets and variables → Actions → Variables."
+            exit 1
+          fi
+          echo "slug=${WORLD_FOLDER_NAME}" >> "$GITHUB_OUTPUT"
+          echo "Resolved slug: ${WORLD_FOLDER_NAME}"
+
       - name: Resolve source ref
         id: ref
         env:
@@ -126,7 +116,7 @@ jobs:
           set -euo pipefail
           python .build-and-publish-action/scripts/shape_orphan.py \
             --source-root . \
-            --slug "${{ inputs.slug }}" \
+            --slug "${{ steps.slug.outputs.slug }}" \
             --templates-dir .build-and-publish-action/templates \
             --output-dir .orphan-tree \
             --caller-repo "${{ github.repository }}" \
@@ -134,7 +124,7 @@ jobs:
           # Read world_version from the same archipelago.json the script just used.
           world_version=$(python -c "
           import json, sys
-          d = json.load(open('worlds/${{ inputs.slug }}/archipelago.json', encoding='utf-8'))
+          d = json.load(open('worlds/${{ steps.slug.outputs.slug }}/archipelago.json', encoding='utf-8'))
           print(d['world_version'])
           ")
           echo "world_version=${world_version}" >> "$GITHUB_OUTPUT"
@@ -147,54 +137,27 @@ jobs:
           (cd .orphan-tree && python -m build --wheel)
           ls -la .orphan-tree/dist/
 
-      - name: Push module-install branch + tag (caller repo)
+      - name: Push wheel branch + tag (caller repo)
         id: push
         if: ${{ !inputs.dry-run }}
         env:
           ORPHAN_TREE: ${{ github.workspace }}/.orphan-tree
           WORLD_VERSION: ${{ steps.shape.outputs.world_version }}
-          WORLD_SLUG: ${{ inputs.slug }}
+          WORLD_SLUG: ${{ steps.slug.outputs.slug }}
           CALLER_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COMMIT_MESSAGE: |
-            module-install: ${{ inputs.slug }} ${{ steps.shape.outputs.world_version }}
+            wheel: ${{ steps.slug.outputs.slug }} ${{ steps.shape.outputs.world_version }}
 
             Built from ${{ steps.ref.outputs.ref }} by MultiworldGG/build-and-publish-action.
           GIT_USER_NAME: github-actions[bot]
           GIT_USER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
           ALLOW_TAG_REUSE: ${{ inputs.allow-tag-reuse && '1' || '0' }}
-        run: bash .build-and-publish-action/scripts/push_module_install.sh
-
-      - name: Mint Oliver installation token
-        id: oliver
-        if: ${{ !inputs.dry-run }}
-        # Hardcoded to the canonical Index repo so the minted installation
-        # token is scoped to that repo only. `inputs.index-repo` overrides
-        # used for testing forks won't carry through here — testing forks
-        # need their own GitHub App installation.
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.OLIVER_APP_ID }}
-          private-key: ${{ secrets.OLIVER_PRIVATE_KEY }}
-          owner: lallaria
-          repositories: MultiworldGG-Index
-
-      - name: Open Index PR
-        if: ${{ !inputs.dry-run }}
-        env:
-          INDEX_PR_TOKEN: ${{ steps.oliver.outputs.token }}
-          INDEX_REPO: ${{ inputs.index-repo }}
-          CALLER_REPO: ${{ github.repository }}
-          WORLD_SLUG: ${{ inputs.slug }}
-          WORLD_VERSION: ${{ steps.shape.outputs.world_version }}
-          TAG_NAME: ${{ steps.push.outputs.tag }}
-          GIT_USER_NAME: ${{ steps.oliver.outputs.app-slug }}[bot]
-          GIT_USER_EMAIL: ${{ steps.oliver.outputs.app-slug }}[bot]@users.noreply.github.com
-        run: python .build-and-publish-action/scripts/open_index_pr.py
+        run: bash .build-and-publish-action/scripts/push_wheel_branch.sh
 
       - name: Dry-run summary
         if: inputs.dry-run
         run: |
           echo "::notice::dry-run mode: shaped tree is at .orphan-tree/, but nothing pushed."
-          echo "World: ${{ inputs.slug }}@${{ steps.shape.outputs.world_version }}"
+          echo "World: ${{ steps.slug.outputs.slug }}@${{ steps.shape.outputs.world_version }}"
           echo "Source ref: ${{ steps.ref.outputs.ref }}"

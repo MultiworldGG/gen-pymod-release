@@ -5,43 +5,42 @@ world, this action:
 
 1. Reads `worlds/<slug>/archipelago.json` from your repo
 2. Builds a pip-installable orphan-branch tree (`pyproject.toml` + `src/worlds/<slug>/...`)
-3. Force-pushes that tree to the `module-install` branch of your repo
-4. Tags it immutably as `module-install/<world_version>`
-5. Opens a PR against [MultiworldGG-Index](https://github.com/lallaria/MultiworldGG-Index)
-   updating your world's `module_location` to the new tag URL
+3. Force-pushes that tree to the `wheel/worlds/<slug>` branch of your repo
+4. Tags it immutably as `wheel/worlds/<slug>/<world_version>`
 
-The Index PR triggers Karen's 7-check security review automatically.
+The matching `MultiworldGG-Index` PR is opened separately by the
+**Oliver-Multiworld-Squirrel** GitHub App when it sees this workflow's
+`workflow_run.completed` event. Karen's review checks fire automatically once
+that PR is open. None of that lives in this action.
 
 ## Quick start (caller workflow)
 
-In your per-world repo, create `.github/workflows/publish-to-index.yml`:
+In your per-world repo, create `.github/workflows/make_pyproject.yml`:
 
 ```yaml
-name: Publish to MultiworldGG-Index
+name: Create and Release Python Package
 on:
   release:
     types: [published]
   workflow_dispatch: {}
 
+permissions:
+  contents: write   # for the wheel branch + tag push to this repo
+
 jobs:
   publish:
-    uses: MultiworldGG/build-and-publish-action/.github/workflows/build.yml@v2
-    with:
-      slug: oot          # ← your world's slug (filename stem, lowercase, snake_case)
-    secrets:
-      OLIVER_APP_ID:      ${{ secrets.MWGG_OLIVER_APP_ID }}
-      OLIVER_PRIVATE_KEY: ${{ secrets.MWGG_OLIVER_PRIVATE_KEY }}
+    uses: MultiworldGG/build-and-publish-action/.github/workflows/build.yml@v3
+    # No `with:` — slug comes from vars.WORLD_FOLDER_NAME
+    # No `secrets:` — no Oliver secrets needed
 ```
 
-Then add two repo Secrets pointing at the **Oliver** GitHub App
-(installed by MultiworldGG admins on `lallaria/MultiworldGG-Index`):
+Then set one repository variable: Settings → Secrets and variables → Actions →
+Variables → New: `WORLD_FOLDER_NAME=<slug>` (e.g. `WORLD_FOLDER_NAME=clique`).
 
-- **`MWGG_OLIVER_APP_ID`** — Oliver App's numeric ID.
-- **`MWGG_OLIVER_PRIVATE_KEY`** — full PEM contents (BEGIN/END lines included)
-  of Oliver's private key.
-
-The action mints a 1-hour installation token at runtime, scoped to the Index
-repo only — no long-lived PATs are stored anywhere.
+The Oliver-Multiworld-Squirrel GitHub App must also be installed on your repo
+(read-only) so it can see the `workflow_run.completed` event and open the
+Index PR on your behalf. Install it from
+<https://github.com/apps/oliver-multiworld-squirrel>.
 
 ## Repo layout requirement
 
@@ -57,16 +56,14 @@ missing. Otherwise a minimal default is generated.
 
 | name | required | default | notes |
 |---|---|---|---|
-| `slug` | ✓ | — | Filename stem of `worlds/<slug>/`. Lowercase + underscores. |
 | `source-ref` | | release tag, else `github.sha` | What to check out from your repo. |
-| `index-repo` | | `lallaria/MultiworldGG-Index` | Override for testing/forks. |
-| `dry-run` | | `false` | Shape + (optionally) build the wheel; skip push + Index PR. |
+| `dry-run` | | `false` | Shape + (optionally) build the wheel; skip push. |
 | `pip-build-check` | | `true` | Run `python -m build` against the shaped tree before pushing. |
 | `allow-tag-reuse` | | `false` | Allow re-publishing the same tag, but only if the new commit SHA matches the old. |
 
 ## Versioning constraint (important)
 
-The tag `module-install/<world_version>` is **immutable**. The action will
+The tag `wheel/worlds/<slug>/<world_version>` is **immutable**. The action will
 **fail hard** if you try to re-publish a `world_version` that already has a
 tag at a different SHA. This is intentional: the Index manifest's
 `module_location` may pin live deployments and saved generations to the old
@@ -77,7 +74,7 @@ re-run.
 
 ## Pinning the action
 
-Pin to a major-version tag (`@v1`); patch updates fast-forward `v1`. Breaking
+Pin to a major-version tag (`@v3`); patch updates fast-forward `v3`. Breaking
 changes cut a new major. Pin to a SHA (`@<full-sha>`) for full reproducibility.
 
 ## How the orphan branch is laid out
@@ -101,8 +98,7 @@ per-world install branches and with the MultiworldGG monorepo's namespace stub.
 .github/workflows/build.yml      reusable workflow (workflow_call)
 scripts/
   shape_orphan.py                build the temp orphan tree from caller's worlds/<slug>/
-  push_module_install.sh         orphan branch + immutable tag push
-  open_index_pr.py               clone Index, edit worlds/<slug>.json, push branch, gh pr create
+  push_wheel_branch.sh           orphan branch + immutable tag push
 templates/
   pyproject.toml.j2              fallback per-world pyproject (only used when caller has none)
   README.md.j2                   auto-generated README for the orphan branch
