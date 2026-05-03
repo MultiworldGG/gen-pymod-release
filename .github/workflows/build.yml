@@ -92,12 +92,14 @@ jobs:
           fetch-depth: 1
 
       - name: Checkout build-and-publish-action (for scripts/templates)
-        # github.workflow_sha pins to the exact commit of the reusable workflow
-        # the caller invoked. Without this, scripts could drift from the YAML.
+        # In a reusable workflow, github.workflow_sha refers to the CALLER's
+        # SHA, not this workflow's — we can't use it to pin the auxiliary
+        # checkout. Hardcoding the major-version tag is the simplest correct
+        # behavior; v3.x patch fixes fast-forward this tag.
         uses: actions/checkout@v4
         with:
           repository: MultiworldGG/build-and-publish-action
-          ref: ${{ github.workflow_sha }}
+          ref: v3
           path: .build-and-publish-action
 
       - name: Set up Python
