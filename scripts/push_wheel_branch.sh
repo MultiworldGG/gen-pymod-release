@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Push the shaped orphan tree as an orphan commit to:
-#   - branch:  module-install                        (force-push, "latest" pointer)
-#   - tag:     module-install/<world_version>        (NEVER overwritten — see check below)
+#   - branch:  wheel/worlds/<slug>                              (force-push, "latest" pointer)
+#   - tag:     wheel/worlds/<slug>/<world_version>              (NEVER overwritten — see check below)
 #
 # Hard requirement (versioning constraint from the design):
 #   Reusing a world_version that already has an immutable tag must NOT silently
@@ -13,7 +13,7 @@
 # Inputs (env vars):
 #   ORPHAN_TREE       absolute path to the shaped tree (output of shape_orphan.py)
 #   WORLD_VERSION     e.g. "7.0.2" — used as tag suffix
-#   WORLD_SLUG        e.g. "oot" — for log messages only
+#   WORLD_SLUG        e.g. "oot" — used as branch + tag prefix and in log messages
 #   CALLER_REPO       e.g. "MultiworldGG/MultiworldGG" — caller's owner/repo
 #   GH_TOKEN          token with `contents: write` on CALLER_REPO
 #   COMMIT_MESSAGE    message for the orphan commit
@@ -48,8 +48,8 @@ if [ ! -d "${ORPHAN_TREE}" ]; then
     exit 2
 fi
 
-TAG="module-install/${WORLD_VERSION}"
-BRANCH="module-install"
+TAG="wheel/worlds/${WORLD_SLUG}/${WORLD_VERSION}"
+BRANCH="wheel/worlds/${WORLD_SLUG}"
 REMOTE_URL="https://x-access-token:${GH_TOKEN}@github.com/${CALLER_REPO}.git"
 SAFE_REMOTE_URL="https://x-access-token:***@github.com/${CALLER_REPO}.git"
 
