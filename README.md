@@ -3,10 +3,10 @@
 Reusable GitHub workflow for per-world MultiworldGG repos. On each release of a
 world, this action:
 
-1. Reads `worlds/<slug>/archipelago.json` from your repo
-2. Builds a pip-installable orphan-branch tree (`pyproject.toml` + `src/worlds/<slug>/...`)
-3. Force-pushes that tree to the `wheel/worlds/<slug>` branch of your repo
-4. Tags it immutably as `wheel/worlds/<slug>/<world_version>`
+1. Reads `worlds/<slug>/archipelago.json` from your repo at the release tag's
+   checked-out source
+2. Builds a pip-installable wheel (`<dist>-<world_version>-py3-none-any.whl`)
+3. Uploads the wheel as an asset on the GitHub release
 
 The matching `MultiworldGG-Index` PR is opened separately by the
 **Oliver-Multiworld-Squirrel** GitHub App when it sees this workflow's
@@ -25,17 +25,30 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  contents: write   # for the wheel branch + tag push to this repo
+  contents: write   # for `gh release upload`
 
 jobs:
   publish:
     uses: MultiworldGG/build-and-publish-action/.github/workflows/build.yml@v3
-    # No `with:` — slug comes from vars.WORLD_FOLDER_NAME
-    # No `secrets:` — no Oliver secrets needed
+    # No `with:` needed for single-world repos.
+    # No `secrets:` — no Oliver secrets needed.
 ```
 
-Then set one repository variable: Settings → Secrets and variables → Actions →
-Variables → New: `WORLD_FOLDER_NAME=<slug>` (e.g. `WORLD_FOLDER_NAME=clique`).
+## Slug resolution
+
+The action resolves the world slug in this order:
+
+1. **`vars.WORLD_FOLDER_NAME`** (single-world repos): set in
+   Settings → Secrets and variables → Actions → Variables →
+   `WORLD_FOLDER_NAME=<slug>` (e.g. `WORLD_FOLDER_NAME=clique`). Your release
+   tag can then be anything (`v1.0.0`, `release-2026-05-08`, etc.).
+
+2. **Release tag prefix `<slug>-<world_version>`** (multi-world repos): if
+   `WORLD_FOLDER_NAME` is unset, the action requires the release event and
+   parses the slug from the tag. Tag your release as e.g. `mariolands-1.2.3`
+   to publish `worlds/mariolands/` at `1.2.3`. This is the recommended path
+   for repos that ship multiple worlds out of one repo (such as
+   [TheLX5/Archipelago](https://github.com/TheLX5/Archipelago/)).
 
 The Oliver-Multiworld-Squirrel GitHub App must also be installed on your repo
 (read-only) so it can see the `workflow_run.completed` event and open the
@@ -44,9 +57,9 @@ Index PR on your behalf. Install it from
 
 ## Repo layout requirement
 
-Your world's source must live at `worlds/<slug>/` in your repo. `archipelago.json`
-is required at `worlds/<slug>/archipelago.json` and must include `world_version`
-(used as the immutable tag suffix).
+Your world's source must live at `worlds/<slug>/` in your repo.
+`archipelago.json` is required at `worlds/<slug>/archipelago.json` and must
+include `world_version`.
 
 If you ship `worlds/<slug>/pyproject.toml`, it is used as-is — `version`,
 `authors`, and `description` are injected from `archipelago.json` only when
@@ -57,40 +70,46 @@ missing. Otherwise a minimal default is generated.
 | name | required | default | notes |
 |---|---|---|---|
 | `source-ref` | | release tag, else `github.sha` | What to check out from your repo. |
-| `dry-run` | | `false` | Shape + (optionally) build the wheel; skip push. |
-| `pip-build-check` | | `true` | Run `python -m build` against the shaped tree before pushing. |
-| `allow-tag-reuse` | | `false` | Allow re-publishing the same tag, but only if the new commit SHA matches the old. |
+| `dry-run` | | `false` | Shape + build the wheel but skip the release-asset upload. |
 
-## Versioning constraint (important)
+## Output
 
-The tag `wheel/worlds/<slug>/<world_version>` is **immutable**. The action will
-**fail hard** if you try to re-publish a `world_version` that already has a
-tag at a different SHA. This is intentional: the Index manifest's
-`module_location` may pin live deployments and saved generations to the old
-tag — overwriting it would break them.
+A single `.whl` file attached to the GitHub release as an asset. Its URL has
+the form:
 
-To publish a new build, **bump `world_version` in `archipelago.json`** and
-re-run.
+```
+https://github.com/<owner>/<repo>/releases/download/<release_tag>/<dist>-<world_version>-py3-none-any.whl
+```
+
+This URL is what the Index manifest's `module_location` will pin to. Pip can
+install it directly: `pip install <url>`.
+
+## Versioning constraint
+
+The release tag is the immutability boundary. GitHub does not silently allow
+re-publishing a release tag at a different SHA — you must manually delete and
+re-create the release to do so. The action uses `gh release upload --clobber`
+so re-running the workflow on the **same** release replaces the asset bytes
+without changing the tag SHA; this is intentional for fixing a transient
+build failure on a release that already exists.
+
+To publish a new build, **bump `world_version` in `archipelago.json`**, tag a
+new release, and let the workflow run.
 
 ## Pinning the action
 
 Pin to a major-version tag (`@v3`); patch updates fast-forward `v3`. Breaking
 changes cut a new major. Pin to a SHA (`@<full-sha>`) for full reproducibility.
 
-## How the orphan branch is laid out
+## Migration from v2 (orphan branch + tag)
 
-```
-pyproject.toml
-src/
-  worlds/
-    <slug>/
-      ...your world's source, copied wholesale from worlds/<slug>/...
-README.md
-```
+v2 force-pushed a `wheel/worlds/<slug>` branch and a
+`wheel/worlds/<slug>/<world_version>` tag on your repo. v3 does neither — the
+wheel is a release asset instead.
 
-This is a [PEP 420 namespace package](https://peps.python.org/pep-0420/)
-contribution to the shared `worlds.` namespace. It coexists with all other
-per-world install branches and with the MultiworldGG monorepo's namespace stub.
+Existing `wheel/worlds/<slug>` branches and tags from v2 are left untouched on
+already-onboarded repos; v3 simply stops creating new ones. The Index manifest
+gets rewritten to the asset-URL form on the world's next release.
 
 ## Layout in this action repo
 
@@ -98,10 +117,9 @@ per-world install branches and with the MultiworldGG monorepo's namespace stub.
 .github/workflows/build.yml      reusable workflow (workflow_call)
 scripts/
   shape_orphan.py                build the temp orphan tree from caller's worlds/<slug>/
-  push_wheel_branch.sh           orphan branch + immutable tag push
 templates/
   pyproject.toml.j2              fallback per-world pyproject (only used when caller has none)
-  README.md.j2                   auto-generated README for the orphan branch
+  README.md.j2                   auto-generated README that ships inside the wheel
 ```
 
 ## License

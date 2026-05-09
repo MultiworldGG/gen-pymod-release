@@ -1,14 +1,16 @@
-"""Build the orphan-branch tree for the build-and-publish-action.
+"""Build the wheel-source tree for the build-and-publish-action.
 
 Inputs:
   - source_root     : checkout of the caller repo (must contain worlds/<slug>/)
   - slug            : world slug
   - templates_dir   : path to this action's templates/ directory
-  - output_dir      : where to write the orphan-branch tree
+  - output_dir      : where to write the orphan-shaped tree
 
 Outputs (under output_dir):
   pyproject.toml
-  README.md
+  .shape_info.json   {slug, world_version, game} — single source of truth
+                     for downstream workflow steps; avoids re-parsing
+                     archipelago.json from build.yml.
   src/
     worlds/
       <slug>/
@@ -141,25 +143,6 @@ def select_or_render_pyproject(
     )
 
 
-def render_readme(
-    *,
-    slug: str,
-    archipelago_json: dict,
-    templates_dir: Path,
-    caller_repo: str,
-    source_ref: str,
-) -> str:
-    return render_jinja_template(
-        templates_dir / "README.md.j2",
-        slug=slug,
-        game_name=archipelago_json.get("game", slug),
-        world_version=str(archipelago_json.get("world_version", "")).strip(),
-        source_ref=source_ref,
-        caller_repo=caller_repo,
-        built_at=datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-    )
-
-
 def shape(
     *,
     source_root: Path,
@@ -209,19 +192,26 @@ def shape(
     if nested_pyproject.is_file():
         nested_pyproject.unlink()
 
-    readme_text = render_readme(
-        slug=slug,
-        archipelago_json=archipelago_json,
-        templates_dir=templates_dir,
-        caller_repo=caller_repo,
-        source_ref=source_ref,
+    # Single source of truth for downstream workflow steps. build.yml reads
+    # this instead of re-parsing archipelago.json. The fields here are exactly
+    # the ones build.yml needs: slug for sanity logging, world_version for the
+    # tag-skew check, and game for human-readable summaries.
+    shape_info = {
+        "slug": slug,
+        "world_version": str(archipelago_json["world_version"]).strip(),
+        "game": archipelago_json.get("game", slug),
+        "source_ref": source_ref,
+        "caller_repo": caller_repo,
+        "built_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    (output_dir / ".shape_info.json").write_text(
+        json.dumps(shape_info, indent=2) + "\n", encoding="utf-8",
     )
-    (output_dir / "README.md").write_text(readme_text, encoding="utf-8")
 
-    print(f"shaped orphan tree at {output_dir}")
+    print(f"shaped tree at {output_dir}")
     print(f"  slug:          {slug}")
-    print(f"  world_version: {archipelago_json['world_version']}")
-    print(f"  game:          {archipelago_json.get('game', '')}")
+    print(f"  world_version: {shape_info['world_version']}")
+    print(f"  game:          {shape_info['game']}")
     print(f"  authors:       {archipelago_json.get('authors', [])}")
 
 

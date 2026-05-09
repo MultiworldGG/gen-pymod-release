@@ -1,4 +1,4 @@
-name: Build and publish per-world wheel branch
+name: Build and publish per-world wheel as release asset
 
 # Reusable workflow. Invoked by per-world repos like:
 #
@@ -6,13 +6,19 @@ name: Build and publish per-world wheel branch
 #   jobs:
 #     publish:
 #       uses: MultiworldGG/build-and-publish-action/.github/workflows/build.yml@v3
-#       # No `with:` — slug comes from vars.WORLD_FOLDER_NAME
-#       # No `secrets:` — no Oliver secrets needed
 #
-# Builds the world from the caller repo's worlds/<slug>/ subtree, force-pushes a
-# `wheel/worlds/<slug>` orphan branch on the caller repo, and tags it immutably
-# as `wheel/worlds/<slug>/<world_version>`. The matching Index PR is opened
-# separately by the Oliver-Multiworld-Squirrel GitHub App when it sees the
+# Builds the world from worlds/<slug>/ at the release tag's checked-out source
+# and uploads the resulting `.whl` as an asset on the release. No orphan branch
+# is pushed; the release tag itself is the immutability boundary.
+#
+# Slug resolution:
+#   1. If `vars.WORLD_FOLDER_NAME` is set, use it (single-world repos).
+#   2. Else, on a `release: published` event, parse the slug from the release
+#      tag prefix `<slug>-<world_version>` (multi-world repos like
+#      TheLX5/Archipelago that ship several worlds out of one repo).
+#
+# The matching Index PR is opened separately by the
+# Oliver-Multiworld-Squirrel GitHub App when it sees the
 # workflow_run.completed event from this workflow.
 
 on:
@@ -26,25 +32,13 @@ on:
         type: string
         default: ""
       dry-run:
-        description: Skip orphan push; just shape and validate.
-        required: false
-        type: boolean
-        default: false
-      pip-build-check:
-        description: Run `python -m build` against the shaped tree to catch errors before push.
-        required: false
-        type: boolean
-        default: true
-      allow-tag-reuse:
-        description: |
-          Allow re-publishing the existing tag if (and only if) the new commit SHA
-          would be identical. Default false — any tag-reuse fails hard.
+        description: Skip release-asset upload; just shape and build the wheel.
         required: false
         type: boolean
         default: false
 
 permissions:
-  contents: write   # for orphan-branch + tag push to the caller repo
+  contents: write   # for `gh release upload` on the caller repo
 
 jobs:
   build:
@@ -52,21 +46,7 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - name: Resolve slug from repo variable
-        id: slug
-        env:
-          WORLD_FOLDER_NAME: ${{ vars.WORLD_FOLDER_NAME }}
-        run: |
-          set -euo pipefail
-          if [ -z "${WORLD_FOLDER_NAME}" ]; then
-            echo "::error::Repository variable WORLD_FOLDER_NAME is not set."
-            echo "Set it in Settings → Secrets and variables → Actions → Variables."
-            exit 1
-          fi
-          echo "slug=${WORLD_FOLDER_NAME}" >> "$GITHUB_OUTPUT"
-          echo "Resolved slug: ${WORLD_FOLDER_NAME}"
-
-      - name: Resolve source ref
+      - name: Resolve source-ref
         id: ref
         env:
           INPUT_REF: ${{ inputs.source-ref }}
@@ -84,6 +64,43 @@ jobs:
           fi
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
           echo "Resolved source-ref: ${ref}"
+
+      - name: Resolve slug
+        id: slug
+        env:
+          WORLD_FOLDER_NAME: ${{ vars.WORLD_FOLDER_NAME }}
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          tag_version=""
+          if [ -n "${WORLD_FOLDER_NAME}" ]; then
+            slug="${WORLD_FOLDER_NAME}"
+            echo "Resolved slug from vars.WORLD_FOLDER_NAME: ${slug}"
+          elif [ "${EVENT_NAME}" = "release" ] && [ -n "${RELEASE_TAG}" ]; then
+            # Multi-world fallback: tag must be `<slug>-<world_version>`
+            # (e.g. `mariolands-1.2.3`).
+            if [[ "${RELEASE_TAG}" != *-* ]]; then
+              echo "::error::vars.WORLD_FOLDER_NAME is not set and release tag '${RELEASE_TAG}' has no '-' separator."
+              echo "Either set vars.WORLD_FOLDER_NAME on this repo, or tag releases as '<slug>-<world_version>' (e.g. 'mariolands-1.2.3')."
+              exit 1
+            fi
+            slug="${RELEASE_TAG%%-*}"
+            tag_version="${RELEASE_TAG#*-}"
+            if [ -z "${slug}" ] || [ -z "${tag_version}" ]; then
+              echo "::error::Release tag '${RELEASE_TAG}' did not parse to a non-empty slug and world_version."
+              exit 1
+            fi
+            echo "Resolved slug from release tag prefix: ${slug} (tag-declared version=${tag_version})"
+          else
+            echo "::error::Cannot resolve slug: vars.WORLD_FOLDER_NAME is unset and no release tag is available."
+            echo "Set repo variable WORLD_FOLDER_NAME, or invoke this workflow on a release event."
+            exit 1
+          fi
+          echo "slug=${slug}" >> "$GITHUB_OUTPUT"
+          # tag_version is empty when slug came from WORLD_FOLDER_NAME — the
+          # version-skew step below treats empty as "skip the check".
+          echo "tag_version=${tag_version}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout caller repo at source-ref
         uses: actions/checkout@v4
@@ -112,7 +129,13 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install tomli_w build
 
-      - name: Shape orphan tree
+      # NOTE: shape_orphan.py is the single source of truth for "does
+      # worlds/<slug>/archipelago.json exist?" — it raises a friendly
+      # ::error:: with the same diagnostic if the directory or the JSON file
+      # is missing. We deliberately do NOT pre-check here; that was duplicate
+      # work and a place where the two checks could drift apart.
+
+      - name: Shape tree
         id: shape
         run: |
           set -euo pipefail
@@ -123,43 +146,69 @@ jobs:
             --output-dir .orphan-tree \
             --caller-repo "${{ github.repository }}" \
             --source-ref "${{ steps.ref.outputs.ref }}"
-          # Read world_version from the same archipelago.json the script just used.
+          # Read world_version from .shape_info.json — the single source of
+          # truth shape_orphan.py wrote. Avoids re-parsing archipelago.json.
           world_version=$(python -c "
-          import json, sys
-          d = json.load(open('worlds/${{ steps.slug.outputs.slug }}/archipelago.json', encoding='utf-8'))
-          print(d['world_version'])
+          import json
+          print(json.load(open('.orphan-tree/.shape_info.json', encoding='utf-8'))['world_version'])
           ")
           echo "world_version=${world_version}" >> "$GITHUB_OUTPUT"
           echo "World version: ${world_version}"
 
-      - name: pip build sanity check
-        if: inputs.pip-build-check
+      - name: Verify tag-declared version matches archipelago.json
+        if: ${{ steps.slug.outputs.tag_version != '' }}
+        env:
+          TAG_VERSION: ${{ steps.slug.outputs.tag_version }}
+          ARCH_VERSION: ${{ steps.shape.outputs.world_version }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          SLUG: ${{ steps.slug.outputs.slug }}
+        run: |
+          set -euo pipefail
+          if [ "${TAG_VERSION}" != "${ARCH_VERSION}" ]; then
+            echo "::error::Release tag '${RELEASE_TAG}' parses to version '${TAG_VERSION}', but worlds/${SLUG}/archipelago.json declares world_version='${ARCH_VERSION}'."
+            echo "Either bump worlds/${SLUG}/archipelago.json:world_version to ${TAG_VERSION}, or re-tag the release as ${SLUG}-${ARCH_VERSION}."
+            exit 1
+          fi
+          echo "Version skew check passed: ${TAG_VERSION} == ${ARCH_VERSION}"
+
+      - name: Build wheel
         run: |
           set -euo pipefail
           (cd .orphan-tree && python -m build --wheel)
           ls -la .orphan-tree/dist/
 
-      - name: Push wheel branch + tag (caller repo)
-        id: push
-        if: ${{ !inputs.dry-run }}
+      - name: Upload wheel to release
+        id: upload
+        if: ${{ !inputs.dry-run && github.event_name == 'release' }}
         env:
-          ORPHAN_TREE: ${{ github.workspace }}/.orphan-tree
-          WORLD_VERSION: ${{ steps.shape.outputs.world_version }}
-          WORLD_SLUG: ${{ steps.slug.outputs.slug }}
-          CALLER_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          COMMIT_MESSAGE: |
-            wheel: ${{ steps.slug.outputs.slug }} ${{ steps.shape.outputs.world_version }}
-
-            Built from ${{ steps.ref.outputs.ref }} by MultiworldGG/build-and-publish-action.
-          GIT_USER_NAME: github-actions[bot]
-          GIT_USER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
-          ALLOW_TAG_REUSE: ${{ inputs.allow-tag-reuse && '1' || '0' }}
-        run: bash .build-and-publish-action/scripts/push_wheel_branch.sh
-
-      - name: Dry-run summary
-        if: inputs.dry-run
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          echo "::notice::dry-run mode: shaped tree is at .orphan-tree/, but nothing pushed."
+          set -euo pipefail
+          shopt -s nullglob
+          wheels=(.orphan-tree/dist/*.whl)
+          if [ ${#wheels[@]} -ne 1 ]; then
+            echo "::error::expected exactly one wheel under .orphan-tree/dist/, got ${#wheels[@]}"
+            exit 1
+          fi
+          wheel="${wheels[0]}"
+          basename="$(basename "$wheel")"
+          echo "Uploading ${basename} to release ${RELEASE_TAG}"
+          # --clobber: re-running the workflow on the same release replaces the
+          # asset bytes. The release tag itself stays immutable, so this does
+          # not introduce the multi-SHA-per-version risk that the old
+          # wheel-branch tag check used to guard against.
+          gh release upload "${RELEASE_TAG}" "$wheel" \
+            --repo "${{ github.repository }}" \
+            --clobber
+          url="https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/${basename}"
+          echo "wheel_url=${url}" >> "$GITHUB_OUTPUT"
+          echo "Asset URL: ${url}"
+
+      - name: Non-release / dry-run summary
+        if: ${{ inputs.dry-run || github.event_name != 'release' }}
+        run: |
+          echo "::notice::Skipping release-asset upload (dry-run=${{ inputs.dry-run }}, event=${{ github.event_name }})."
           echo "World: ${{ steps.slug.outputs.slug }}@${{ steps.shape.outputs.world_version }}"
           echo "Source ref: ${{ steps.ref.outputs.ref }}"
+          ls -la .orphan-tree/dist/ || true
