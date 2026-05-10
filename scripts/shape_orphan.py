@@ -1,22 +1,22 @@
 """Build the wheel-source tree for the build-and-publish-action.
 
 Inputs:
-  - source_root     : checkout of the caller repo (must contain worlds/<slug>/)
-  - slug            : world slug
+  - source_root     : checkout of the caller repo (must contain worlds/<apworld>/)
+  - apworld            : world apworld
   - templates_dir   : path to this action's templates/ directory
   - output_dir      : where to write the orphan-shaped tree
 
 Outputs (under output_dir):
   pyproject.toml
-  .shape_info.json   {slug, world_version, game} — single source of truth
+  .shape_info.json   {apworld, world_version, game} — single source of truth
                      for downstream workflow steps; avoids re-parsing
                      archipelago.json from build.yml.
   src/
     worlds/
-      <slug>/
+      <apworld>/
         ...world source...
 
-If the caller's repo ships `worlds/<slug>/pyproject.toml`, it is used as-is —
+If the caller's repo ships `worlds/<apworld>/pyproject.toml`, it is used as-is —
 with `version` and `authors` injected from `archipelago.json` only if those
 fields are absent (mirrors the `tools/build_wheels.py` pattern in the
 MultiworldGG monorepo).
@@ -96,20 +96,20 @@ def _render_simple(text: str, kwargs: dict) -> str:
 def select_or_render_pyproject(
     *,
     caller_world_dir: Path,
-    slug: str,
+    apworld: str,
     archipelago_json: dict,
     templates_dir: Path,
 ) -> str:
     """Return the pyproject.toml text for the orphan branch.
 
-    Preference: use the caller's `worlds/<slug>/pyproject.toml` if present,
+    Preference: use the caller's `worlds/<apworld>/pyproject.toml` if present,
     injecting version and authors from archipelago.json when missing/blank.
     Fallback: render the bundled template.
     """
     caller_pyproject = caller_world_dir / "pyproject.toml"
     world_version = str(archipelago_json.get("world_version", "")).strip()
     authors = archipelago_json.get("authors") or []
-    game_name = archipelago_json.get("game", slug)
+    game_name = archipelago_json.get("game", apworld)
 
     if caller_pyproject.is_file():
         with open(caller_pyproject, "rb") as f:
@@ -136,7 +136,7 @@ def select_or_render_pyproject(
     # Fallback: render the bundled template.
     return render_jinja_template(
         templates_dir / "pyproject.toml.j2",
-        slug=slug,
+        apworld=apworld,
         world_version=world_version,
         game_name=game_name,
         authors=authors,
@@ -146,23 +146,23 @@ def select_or_render_pyproject(
 def shape(
     *,
     source_root: Path,
-    slug: str,
+    apworld: str,
     templates_dir: Path,
     output_dir: Path,
     caller_repo: str,
     source_ref: str,
 ) -> None:
-    caller_world_dir = source_root / "worlds" / slug
+    caller_world_dir = source_root / "worlds" / apworld
     if not caller_world_dir.is_dir():
         raise SystemExit(
-            f"::error::worlds/{slug}/ not found in {source_root}. "
-            f"This action requires the world's source to live at worlds/{slug}/ "
+            f"::error::worlds/{apworld}/ not found in {source_root}. "
+            f"This action requires the world's source to live at worlds/{apworld}/ "
             f"in the caller repo."
         )
     archipelago_json_path = caller_world_dir / "archipelago.json"
     if not archipelago_json_path.is_file():
         raise SystemExit(
-            f"::error::worlds/{slug}/archipelago.json not found. "
+            f"::error::worlds/{apworld}/archipelago.json not found. "
             f"It is required to source world_version + authors + game name."
         )
     archipelago_json = read_archipelago_json(archipelago_json_path)
@@ -176,30 +176,30 @@ def shape(
         shutil.rmtree(output_dir)
     (output_dir / "src" / "worlds").mkdir(parents=True)
 
-    # Copy the world dir wholesale into src/worlds/<slug>/.
-    shutil.copytree(caller_world_dir, output_dir / "src" / "worlds" / slug)
+    # Copy the world dir wholesale into src/worlds/<apworld>/.
+    shutil.copytree(caller_world_dir, output_dir / "src" / "worlds" / apworld)
 
     pyproject_text = select_or_render_pyproject(
         caller_world_dir=caller_world_dir,
-        slug=slug,
+        apworld=apworld,
         archipelago_json=archipelago_json,
         templates_dir=templates_dir,
     )
     (output_dir / "pyproject.toml").write_text(pyproject_text, encoding="utf-8")
 
-    # Drop pyproject.toml from inside src/worlds/<slug>/ — the root one is canonical.
-    nested_pyproject = output_dir / "src" / "worlds" / slug / "pyproject.toml"
+    # Drop pyproject.toml from inside src/worlds/<apworld>/ — the root one is canonical.
+    nested_pyproject = output_dir / "src" / "worlds" / apworld / "pyproject.toml"
     if nested_pyproject.is_file():
         nested_pyproject.unlink()
 
     # Single source of truth for downstream workflow steps. build.yml reads
     # this instead of re-parsing archipelago.json. The fields here are exactly
-    # the ones build.yml needs: slug for sanity logging, world_version for the
+    # the ones build.yml needs: apworld for sanity logging, world_version for the
     # tag-skew check, and game for human-readable summaries.
     shape_info = {
-        "slug": slug,
+        "apworld": apworld,
         "world_version": str(archipelago_json["world_version"]).strip(),
-        "game": archipelago_json.get("game", slug),
+        "game": archipelago_json.get("game", apworld),
         "source_ref": source_ref,
         "caller_repo": caller_repo,
         "built_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -209,7 +209,7 @@ def shape(
     )
 
     print(f"shaped tree at {output_dir}")
-    print(f"  slug:          {slug}")
+    print(f"  apworld:          {apworld}")
     print(f"  world_version: {shape_info['world_version']}")
     print(f"  game:          {shape_info['game']}")
     print(f"  authors:       {archipelago_json.get('authors', [])}")
@@ -219,7 +219,7 @@ def _cli(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-root", required=True, type=Path,
                         help="Caller repo checkout root")
-    parser.add_argument("--slug", required=True)
+    parser.add_argument("--apworld", required=True)
     parser.add_argument("--templates-dir", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--caller-repo", required=True,
@@ -230,7 +230,7 @@ def _cli(argv: Optional[list[str]] = None) -> int:
 
     shape(
         source_root=args.source_root,
-        slug=args.slug,
+        apworld=args.apworld,
         templates_dir=args.templates_dir,
         output_dir=args.output_dir,
         caller_repo=args.caller_repo,

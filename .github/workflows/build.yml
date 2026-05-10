@@ -1,25 +1,19 @@
-name: Build and publish per-world wheel as release asset
+name: Build per-world wheel as to add to release asset
 
 # Reusable workflow. Invoked by per-world repos like:
 #
 #   on: { release: { types: [published] }, workflow_dispatch: {} }
 #   jobs:
 #     publish:
-#       uses: MultiworldGG/build-and-publish-action/.github/workflows/build.yml@v3
+#       uses: MultiworldGG/gen-pymod-release/.github/workflows/build.yml@v3
 #
-# Builds the world from worlds/<slug>/ at the release tag's checked-out source
-# and uploads the resulting `.whl` as an asset on the release. No orphan branch
-# is pushed; the release tag itself is the immutability boundary.
+# Builds the world from worlds/<apworld>/ at the release tag's checked-out source
+# and uploads the resulting `.whl` as an asset on the release.
 #
-# Slug resolution:
-#   1. If `vars.WORLD_FOLDER_NAME` is set, use it (single-world repos).
-#   2. Else, on a `release: published` event, parse the slug from the release
-#      tag prefix `<slug>-<world_version>` (multi-world repos like
-#      TheLX5/Archipelago that ship several worlds out of one repo).
-#
-# The matching Index PR is opened separately by the
-# Oliver-Multiworld-Squirrel GitHub App when it sees the
+# The matching Index PR is opened separately by the Oliver Multiworld Squirrel GitHub App when it sees the
 # workflow_run.completed event from this workflow.
+#
+# TODO: Change this. Give apworld owner a 'gh' command to start a release workflow from their 
 
 on:
   workflow_call:
@@ -65,40 +59,36 @@ jobs:
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
           echo "Resolved source-ref: ${ref}"
 
-      - name: Resolve slug
-        id: slug
+      - name: Resolve apworld
+        id: apworld
         env:
-          WORLD_FOLDER_NAME: ${{ vars.WORLD_FOLDER_NAME }}
           EVENT_NAME: ${{ github.event_name }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
           tag_version=""
-          if [ -n "${WORLD_FOLDER_NAME}" ]; then
-            slug="${WORLD_FOLDER_NAME}"
-            echo "Resolved slug from vars.WORLD_FOLDER_NAME: ${slug}"
-          elif [ "${EVENT_NAME}" = "release" ] && [ -n "${RELEASE_TAG}" ]; then
-            # Multi-world fallback: tag must be `<slug>-<world_version>`
-            # (e.g. `mariolands-1.2.3`).
+          if [ "${EVENT_NAME}" = "release" ] && [ -n "${RELEASE_TAG}" ]; then
+            # Multi-world fallback: tag must be `<apworld>-<world_version>`
+            # (e.g. `generic-1.2.3`).
             if [[ "${RELEASE_TAG}" != *-* ]]; then
-              echo "::error::vars.WORLD_FOLDER_NAME is not set and release tag '${RELEASE_TAG}' has no '-' separator."
-              echo "Either set vars.WORLD_FOLDER_NAME on this repo, or tag releases as '<slug>-<world_version>' (e.g. 'mariolands-1.2.3')."
+              echo "::error::release tag '${RELEASE_TAG}' has no '-' separator."
+              echo "Tag releases as '<apworld>-<world_version>' (e.g. 'generic-1.2.3')."
               exit 1
             fi
-            slug="${RELEASE_TAG%%-*}"
+            apworld="${RELEASE_TAG%%-*}"
             tag_version="${RELEASE_TAG#*-}"
-            if [ -z "${slug}" ] || [ -z "${tag_version}" ]; then
-              echo "::error::Release tag '${RELEASE_TAG}' did not parse to a non-empty slug and world_version."
+            if [ -z "${apworld}" ] || [ -z "${tag_version}" ]; then
+              echo "::error::Release tag '${RELEASE_TAG}' did not parse to a non-empty apworld and world_version."
               exit 1
             fi
-            echo "Resolved slug from release tag prefix: ${slug} (tag-declared version=${tag_version})"
+            echo "Resolved apworld from release tag prefix: ${apworld} (tag-declared version=${tag_version})"
           else
-            echo "::error::Cannot resolve slug: vars.WORLD_FOLDER_NAME is unset and no release tag is available."
+            echo "::error::Cannot resolve apworld: vars.WORLD_FOLDER_NAME is unset and no release tag is available."
             echo "Set repo variable WORLD_FOLDER_NAME, or invoke this workflow on a release event."
             exit 1
           fi
-          echo "slug=${slug}" >> "$GITHUB_OUTPUT"
-          # tag_version is empty when slug came from WORLD_FOLDER_NAME — the
+          echo "apworld=${apworld}" >> "$GITHUB_OUTPUT"
+          # tag_version is empty when apworld came from WORLD_FOLDER_NAME — the
           # version-skew step below treats empty as "skip the check".
           echo "tag_version=${tag_version}" >> "$GITHUB_OUTPUT"
 
@@ -130,7 +120,7 @@ jobs:
           python -m pip install tomli_w build
 
       # NOTE: shape_orphan.py is the single source of truth for "does
-      # worlds/<slug>/archipelago.json exist?" — it raises a friendly
+      # worlds/<apworld>/archipelago.json exist?" — it raises a friendly
       # ::error:: with the same diagnostic if the directory or the JSON file
       # is missing. We deliberately do NOT pre-check here; that was duplicate
       # work and a place where the two checks could drift apart.
@@ -141,7 +131,7 @@ jobs:
           set -euo pipefail
           python .build-and-publish-action/scripts/shape_orphan.py \
             --source-root . \
-            --slug "${{ steps.slug.outputs.slug }}" \
+            --apworld "${{ steps.apworld.outputs.apworld }}" \
             --templates-dir .build-and-publish-action/templates \
             --output-dir .orphan-tree \
             --caller-repo "${{ github.repository }}" \
@@ -156,17 +146,17 @@ jobs:
           echo "World version: ${world_version}"
 
       - name: Verify tag-declared version matches archipelago.json
-        if: ${{ steps.slug.outputs.tag_version != '' }}
+        if: ${{ steps.apworld.outputs.tag_version != '' }}
         env:
-          TAG_VERSION: ${{ steps.slug.outputs.tag_version }}
+          TAG_VERSION: ${{ steps.apworld.outputs.tag_version }}
           ARCH_VERSION: ${{ steps.shape.outputs.world_version }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-          SLUG: ${{ steps.slug.outputs.slug }}
+          APWORLD: ${{ steps.apworld.outputs.apworld }}
         run: |
           set -euo pipefail
           if [ "${TAG_VERSION}" != "${ARCH_VERSION}" ]; then
-            echo "::error::Release tag '${RELEASE_TAG}' parses to version '${TAG_VERSION}', but worlds/${SLUG}/archipelago.json declares world_version='${ARCH_VERSION}'."
-            echo "Either bump worlds/${SLUG}/archipelago.json:world_version to ${TAG_VERSION}, or re-tag the release as ${SLUG}-${ARCH_VERSION}."
+            echo "::error::Release tag '${RELEASE_TAG}' parses to version '${TAG_VERSION}', but worlds/${APWORLD}/archipelago.json declares world_version='${ARCH_VERSION}'."
+            echo "Either bump worlds/${APWORLD}/archipelago.json:world_version to ${TAG_VERSION}, or re-tag the release as ${APWORLD}-${ARCH_VERSION}."
             exit 1
           fi
           echo "Version skew check passed: ${TAG_VERSION} == ${ARCH_VERSION}"
@@ -209,6 +199,6 @@ jobs:
         if: ${{ inputs.dry-run || github.event_name != 'release' }}
         run: |
           echo "::notice::Skipping release-asset upload (dry-run=${{ inputs.dry-run }}, event=${{ github.event_name }})."
-          echo "World: ${{ steps.slug.outputs.slug }}@${{ steps.shape.outputs.world_version }}"
+          echo "World: ${{ steps.apworld.outputs.apworld }}@${{ steps.shape.outputs.world_version }}"
           echo "Source ref: ${{ steps.ref.outputs.ref }}"
           ls -la .orphan-tree/dist/ || true

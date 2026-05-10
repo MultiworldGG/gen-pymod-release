@@ -1,9 +1,9 @@
-# MultiworldGG/build-and-publish-action
+# MultiworldGG/gen-pymod-release
 
-Reusable GitHub workflow for per-world MultiworldGG repos. On each release of a
-world, this action:
+Reusable GitHub workflow for per-world MultiworldGG repos. When you want to release a world
+  this action:
 
-1. Reads `worlds/<slug>/archipelago.json` from your repo at the release tag's
+1. Reads `worlds/<apworld>/archipelago.json` from your repo at the release tag's
    checked-out source
 2. Builds a pip-installable wheel (`<dist>-<world_version>-py3-none-any.whl`)
 3. Uploads the wheel as an asset on the GitHub release
@@ -29,24 +29,16 @@ permissions:
 
 jobs:
   publish:
-    uses: MultiworldGG/build-and-publish-action/.github/workflows/build.yml@v3
+    uses: MultiworldGG/gen-pymod-release/.github/workflows/build.yml@v3
     # No `with:` needed for single-world repos.
     # No `secrets:` — no Oliver secrets needed.
 ```
 
-## Slug resolution
+## APWorld resolution
 
-The action resolves the world slug in this order:
-
-1. **`vars.WORLD_FOLDER_NAME`** (single-world repos): set in
-   Settings → Secrets and variables → Actions → Variables →
-   `WORLD_FOLDER_NAME=<slug>` (e.g. `WORLD_FOLDER_NAME=clique`). Your release
-   tag can then be anything (`v1.0.0`, `release-2026-05-08`, etc.).
-
-2. **Release tag prefix `<slug>-<world_version>`** (multi-world repos): if
-   `WORLD_FOLDER_NAME` is unset, the action requires the release event and
-   parses the slug from the tag. Tag your release as e.g. `mariolands-1.2.3`
-   to publish `worlds/mariolands/` at `1.2.3`. This is the recommended path
+**Release tag prefix `<apworld>-<world_version>`**: The action requires the release event and
+   parses the apworld from the tag. Tag your release as e.g. `generic-1.2.3`
+   to publish `worlds/generic/` at `1.2.3`. This is the recommended path
    for repos that ship multiple worlds out of one repo (such as
    [TheLX5/Archipelago](https://github.com/TheLX5/Archipelago/)).
 
@@ -57,11 +49,11 @@ Index PR on your behalf. Install it from
 
 ## Repo layout requirement
 
-Your world's source must live at `worlds/<slug>/` in your repo.
-`archipelago.json` is required at `worlds/<slug>/archipelago.json` and must
+Your world's source must live at `worlds/<apworld>/` in your repo.
+`archipelago.json` is required at `worlds/<apworld>/archipelago.json` and must
 include `world_version`.
 
-If you ship `worlds/<slug>/pyproject.toml`, it is used as-is — `version`,
+If you ship `worlds/<apworld>/pyproject.toml`, it is used as-is — `version`,
 `authors`, and `description` are injected from `archipelago.json` only when
 missing. Otherwise a minimal default is generated.
 
@@ -107,22 +99,12 @@ new release, and let the workflow run.
 Pin to a major-version tag (`@v3`); patch updates fast-forward `v3`. Breaking
 changes cut a new major. Pin to a SHA (`@<full-sha>`) for full reproducibility.
 
-## Migration from v2 (orphan branch + tag)
-
-v2 force-pushed a `wheel/worlds/<slug>` branch and a
-`wheel/worlds/<slug>/<world_version>` tag on your repo. v3 does neither — the
-wheel is a release asset instead.
-
-Existing `wheel/worlds/<slug>` branches and tags from v2 are left untouched on
-already-onboarded repos; v3 simply stops creating new ones. The Index manifest
-gets rewritten to the asset-URL form on the world's next release.
-
 ## Layout in this action repo
 
 ```
 .github/workflows/build.yml      reusable workflow (workflow_call)
 scripts/
-  shape_orphan.py                build the temp orphan tree from caller's worlds/<slug>/
+  shape_orphan.py                build the temp orphan tree from caller's worlds/<apworld>/
 templates/
   pyproject.toml.j2              fallback per-world pyproject (only used when caller has none)
   README.md.j2                   auto-generated README that ships inside the wheel
