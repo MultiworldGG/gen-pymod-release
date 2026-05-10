@@ -194,13 +194,13 @@ jobs:
           wheel="${wheels[0]}"
           basename="$(basename "$wheel")"
           echo "Uploading ${basename} to release ${RELEASE_TAG}"
-          # --clobber: re-running the workflow on the same release replaces the
-          # asset bytes. The release tag itself stays immutable, so this does
-          # not introduce the multi-SHA-per-version risk that the old
-          # wheel-branch tag check used to guard against.
+          # No --clobber: the asset bytes are part of the trust boundary that
+          # the consumer-side `module_location#sha256=<hex>` pin protects. If a
+          # re-upload is needed (transient build failure, etc.), delete the
+          # existing asset (`gh release delete-asset`) or recreate the release
+          # first — making every overwrite a deliberate human action.
           gh release upload "${RELEASE_TAG}" "$wheel" \
-            --repo "${{ github.repository }}" \
-            --clobber
+            --repo "${{ github.repository }}"
           url="https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/${basename}"
           echo "wheel_url=${url}" >> "$GITHUB_OUTPUT"
           echo "Asset URL: ${url}"
