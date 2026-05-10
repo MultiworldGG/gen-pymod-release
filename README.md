@@ -88,10 +88,16 @@ install it directly: `pip install <url>`.
 
 The release tag is the immutability boundary. GitHub does not silently allow
 re-publishing a release tag at a different SHA — you must manually delete and
-re-create the release to do so. The action uses `gh release upload --clobber`
-so re-running the workflow on the **same** release replaces the asset bytes
-without changing the tag SHA; this is intentional for fixing a transient
-build failure on a release that already exists.
+re-create the release to do so.
+
+The action uploads without `--clobber`: re-running the workflow on a release
+that already has a `.whl` asset will fail (`gh release upload` refuses to
+overwrite). This is deliberate — the asset bytes are pinned by a
+`#sha256=<hex>` fragment on the consumer side once Oliver opens the Index PR,
+and a silent overwrite would invalidate that pin without warning. To fix a
+transient build failure on an existing release, either
+`gh release delete-asset <release_tag> <asset>` first, or delete and recreate
+the entire release. Both are explicit human actions.
 
 To publish a new build, **bump `world_version` in `archipelago.json`**, tag a
 new release, and let the workflow run.
