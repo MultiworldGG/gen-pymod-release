@@ -109,6 +109,74 @@ def _file_module_path(py_file: Path, world_dir: Path, apworld: str) -> str:
     return ".".join([f"worlds.{apworld}", *rel_parts]) if rel_parts else f"worlds.{apworld}"
 
 
+_LAUNCH_DISPATCH_NAMES = frozenset({"launch", "launch_subprocess", "launch_component"})
+
+
+def _trace_wrapper_to_inner_target(
+    func_def: ast.FunctionDef | ast.AsyncFunctionDef,
+    file_module: str,
+    is_init: bool,
+) -> Optional[tuple[str, str]]:
+    """Trace a thin launcher wrapper to the inner client module + attr.
+
+    Worlds typically register their client via a wrapper sitting in
+    `__init__.py`:
+
+        def launch_client(*args):
+            from .Client import main
+            launch(main, name="...", args=args)
+
+    Pointing the entry point at this wrapper would force the entry-point
+    consumer to import `__init__.py`, which drags in `BaseClasses`, the
+    world's option/region/item module-level code, and re-fires the
+    `components.append(...)` side effect we're trying to retire. Instead,
+    walk the wrapper's body for the inner `from .X import Y` and the inner
+    `launch(...)` / `launch_subprocess(...)` / `launch_component(...)` call
+    whose first positional argument is `Y`, and emit `<resolved>:Y` so the
+    entry point lands on the actual client module.
+
+    Returns None when the wrapper is not a simple `import + launch(Y)`
+    shape — in that case the caller should skip emission and warn.
+    """
+    body_imports: dict[str, tuple[str, str]] = {}
+    for stmt in func_def.body:
+        if not isinstance(stmt, ast.ImportFrom):
+            continue
+        if stmt.level >= 1:
+            target_module = _resolve_relative_import(stmt, file_module, is_init)
+        elif stmt.module:
+            target_module = stmt.module
+        else:
+            continue
+        for alias in stmt.names:
+            if alias.name == "*":
+                continue
+            body_imports[alias.asname or alias.name] = (target_module, alias.name)
+
+    if not body_imports:
+        return None
+
+    for stmt in ast.walk(func_def):
+        if not isinstance(stmt, ast.Call):
+            continue
+        call_name: Optional[str] = None
+        if isinstance(stmt.func, ast.Name):
+            call_name = stmt.func.id
+        elif isinstance(stmt.func, ast.Attribute):
+            call_name = stmt.func.attr
+        if call_name not in _LAUNCH_DISPATCH_NAMES:
+            continue
+        if not stmt.args:
+            continue
+        first = stmt.args[0]
+        if not isinstance(first, ast.Name):
+            continue
+        if first.id in body_imports:
+            return body_imports[first.id]
+
+    return None
+
+
 def _resolve_relative_import(node: ast.ImportFrom, file_module: str, is_init: bool) -> str:
     """Resolve a relative `from .X import Y` import to an absolute module path,
     given the dotted module of the file containing the import."""
@@ -146,6 +214,19 @@ def parse_client_entry_points(world_dir: Path, apworld: str) -> list[tuple[str, 
     `worlds/AutoWorld` deprecation roadmap recorded in
     `project_split_design_decisions.md`.
 
+    Key convention matches `tools/add_required_world_files.py` from the
+    monorepo: the first discovered client is keyed `worlds.<apworld>.Client`;
+    additional clients (rare) are keyed `worlds.<apworld>.Client.<func_name>`
+    so they cannot collide with the canonical one.
+
+    Wrappers that live in `__init__.py` are traced one level deeper via
+    `_trace_wrapper_to_inner_target`, because pointing the entry point at the
+    package's `__init__` would defeat the whole purpose of using entry-point
+    discovery (it would re-import all of the heavy `BaseClasses` /
+    options / regions module-level code AND re-fire `components.append`).
+    If the wrapper isn't a simple `import + launch(...)` shape we skip with
+    a loud warning rather than emit something that won't load.
+
     If the apworld name is not a valid Python identifier (e.g. `2048`,
     `civ_6` is fine, `2048` is not because it starts with a digit), entry
     points are silently skipped — `setuptools` rejects entry-point targets
@@ -163,8 +244,9 @@ def parse_client_entry_points(world_dir: Path, apworld: str) -> list[tuple[str, 
         )
         return []
 
+    pkg_root = f"worlds.{apworld}"
     results: list[tuple[str, str]] = []
-    seen: set[tuple[str, str]] = set()
+    seen_targets: set[tuple[str, str]] = set()
 
     for py_file in sorted(world_dir.rglob("*.py")):
         try:
@@ -237,13 +319,54 @@ def parse_client_entry_points(world_dir: Path, apworld: str) -> list[tuple[str, 
                 continue
 
             target_module, attr = local_to_target.get(func_name, (file_module, func_name))
-            ep_key = f"worlds.{apworld}.{func_name}"
-            ep_value = f"{target_module}:{attr}"
-            sig = (ep_key, ep_value)
-            if sig in seen:
+
+            # Avoid pointing the entry point at the world's __init__ module.
+            # Loading it would re-fire all the heavy __init__-level imports
+            # (BaseClasses, options, regions, ...) and re-run
+            # `components.append(...)`. Trace the wrapper body to the real
+            # client module instead.
+            if target_module == pkg_root:
+                wrapper_def = next(
+                    (n for n in tree.body
+                     if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                     and n.name == func_name),
+                    None,
+                )
+                traced: Optional[tuple[str, str]] = (
+                    _trace_wrapper_to_inner_target(wrapper_def, file_module, is_init)
+                    if wrapper_def is not None else None
+                )
+                if traced is None:
+                    logging.warning(
+                        "%s: Type.CLIENT Component(func=%s) resolves to %s "
+                        "(the world's __init__), and the wrapper body isn't a "
+                        "simple `from .X import Y; launch(Y, ...)` shape. "
+                        "Skipping entry-point emission — pointing it at "
+                        "__init__ would defeat lazy client loading. Move %s "
+                        "into a sibling module (e.g. Register.py / "
+                        "client/component.py) or pin a custom entry point in "
+                        "the world's pyproject.toml.",
+                        py_file, func_name, target_module, func_name,
+                    )
+                    continue
+                target_module, attr = traced
+
+            if (target_module, attr) in seen_targets:
                 continue
-            seen.add(sig)
-            results.append(sig)
+            seen_targets.add((target_module, attr))
+
+            # Match the convention in
+            # `MultiworldGG-gui-changes/tools/add_required_world_files.py`:
+            # the first client per world is keyed `worlds.<apworld>.Client`
+            # (the canonical singular). For the rare case of multiple
+            # clients in one world, disambiguate with a function-name
+            # suffix so neither collides with the canonical key.
+            if not results:
+                ep_key = f"{pkg_root}.Client"
+            else:
+                ep_key = f"{pkg_root}.Client.{func_name}"
+            ep_value = f"{target_module}:{attr}"
+            results.append((ep_key, ep_value))
 
     return results
 
