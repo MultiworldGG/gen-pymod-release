@@ -509,7 +509,11 @@ def shape(
     manifest_text = (
         "global-exclude *\n"
         f"graft src/worlds/{apworld}\n"
-        "global-exclude *~ *.py[cod]\n"
+        # NOTE: pattern is *.py[co] (not *.py[cod]) — the bracket char-class
+        # matches any single listed letter, so [cod] would also match `.pyd`,
+        # i.e. Windows native extensions. We want to exclude .pyc/.pyo
+        # bytecode but ship .pyd extensions.
+        "global-exclude *~ *.py[co]\n"
         "include pyproject.toml\n"
     )
     (output_dir / "MANIFEST.in").write_text(manifest_text, encoding="utf-8")
