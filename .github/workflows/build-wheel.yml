@@ -170,22 +170,41 @@ jobs:
           # branch name or short SHA; gh api refs needs a full SHA.
           sha="$(git rev-parse "${SOURCE_REF}^{commit}")"
 
-          # Create the tag ref. Fails if it already exists -- intentional
-          # immutability. To re-release at a different SHA, delete the tag and
-          # release first (deliberate human action).
-          echo "Creating tag ${tag} at ${sha}"
-          gh api \
-            --method POST \
-            "repos/${GITHUB_REPOSITORY}/git/refs" \
-            -f "ref=refs/tags/${tag}" \
-            -f "sha=${sha}"
+          # Create the tag ref, or accept an existing tag if it already points
+          # at the same SHA. The real immutability boundary is the wheel asset
+          # below (no --clobber). The tag-existing case can happen legitimately
+          # when a prior workflow run created the tag but failed before
+          # uploading the wheel.
+          existing_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/refs/tags/${tag}" --jq '.object.sha' 2>/dev/null || true)"
+          if [ -n "${existing_sha}" ]; then
+            if [ "${existing_sha}" = "${sha}" ]; then
+              echo "Tag ${tag} already exists at ${sha} -- reusing."
+            else
+              echo "::error::Tag ${tag} exists at ${existing_sha}, but source-ref resolves to ${sha}."
+              echo "Refusing to move the tag silently. If this is intentional, delete the tag + release manually first."
+              exit 1
+            fi
+          else
+            echo "Creating tag ${tag} at ${sha}"
+            gh api \
+              --method POST \
+              "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f "ref=refs/tags/${tag}" \
+              -f "sha=${sha}"
+          fi
 
-          # Create the release at that tag with auto-generated notes.
-          echo "Creating release ${tag}"
-          gh release create "${tag}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "${tag}" \
-            --generate-notes
+          # Create the release at that tag, or skip if one already exists.
+          # The wheel-asset upload below is the operation that must be unique;
+          # the release shell can be reused if a prior run created it.
+          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "Release ${tag} already exists -- skipping create."
+          else
+            echo "Creating release ${tag}"
+            gh release create "${tag}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${tag}" \
+              --generate-notes
+          fi
 
           # Upload the wheel. No --clobber: re-uploads must be deliberate.
           # See build.yml for the same convention and rationale (consumers
