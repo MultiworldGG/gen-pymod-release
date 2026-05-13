@@ -1,0 +1,191 @@
+name: Build pure-Python wheel and release
+
+# Reusable workflow. Invoked by flat-layout pure-Python setuptools repos like:
+#
+#   on:
+#     workflow_dispatch:
+#       inputs:
+#         version: { required: true, type: string }
+#   jobs:
+#     publish:
+#       uses: MultiworldGG/gen-pymod-release/.github/workflows/build-wheel.yml@v3
+#       with: { version: ${{ inputs.version }} }
+#
+# Rewrites pyproject.toml:[project].version in the runner's checkout to match
+# the input, builds a wheel, creates tag v<version>, creates a GitHub Release,
+# and attaches the wheel as an asset. The committed pyproject.toml is NOT
+# modified -- the workflow input is the single source of truth.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: |
+          Version to release (e.g. 0.1.1). Tag will be v<version>.
+          pyproject.toml:[project].version is rewritten to match in the runner only.
+        required: true
+        type: string
+      source-ref:
+        description: |
+          Git ref of the caller repo to build from. Defaults to the workflow's
+          SHA (the caller workflow's HEAD).
+        required: false
+        type: string
+        default: ""
+      python-version:
+        description: |
+          Python interpreter to use for the build. Pure-Python wheels are
+          cross-version (py3-none-any), so this only affects build tooling.
+        required: false
+        type: string
+        default: "3.13"
+      dry-run:
+        description: Build the wheel but skip tag / release / asset upload.
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # tag ref, release create, asset upload on the caller repo
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Resolve source-ref
+        id: ref
+        env:
+          INPUT_REF: ${{ inputs.source-ref }}
+          CTX_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_REF}" ]; then
+            ref="${INPUT_REF}"
+          else
+            ref="${CTX_SHA}"
+          fi
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+          echo "Resolved source-ref: ${ref}"
+
+      - name: Checkout caller repo at source-ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ref.outputs.ref }}
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install build-time deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install tomli_w build
+
+      - name: Rewrite pyproject.toml [project].version
+        env:
+          NEW_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          python <<'PY'
+          import os, pathlib, sys, tomllib
+          import tomli_w
+
+          new_version = os.environ["NEW_VERSION"]
+          path = pathlib.Path("pyproject.toml")
+          if not path.exists():
+              sys.exit("::error::pyproject.toml not found at repo root")
+          with path.open("rb") as f:
+              data = tomllib.load(f)
+          if "project" not in data:
+              sys.exit("::error::pyproject.toml has no [project] table")
+          old = data["project"].get("version", "<unset>")
+          data["project"]["version"] = new_version
+          with path.open("wb") as f:
+              tomli_w.dump(data, f)
+          print(f"Rewrote [project].version: {old} -> {new_version}")
+          PY
+
+      - name: Build wheel
+        run: |
+          set -euo pipefail
+          python -m build --wheel
+          ls -la dist/
+
+      - name: Sanity-check wheel
+        id: wheel
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          if [ ${#wheels[@]} -ne 1 ]; then
+            echo "::error::expected exactly one wheel under dist/, got ${#wheels[@]}"
+            exit 1
+          fi
+          wheel="${wheels[0]}"
+          basename="$(basename "$wheel")"
+          # Wheel filename: {distribution}-{version}-{python tag}-{abi tag}-{platform tag}.whl
+          # Verify the version segment matches the input -- catches a silent rewrite failure.
+          if [[ "$basename" != *"-${EXPECTED_VERSION}-"* ]]; then
+            echo "::error::wheel '${basename}' does not contain version segment '-${EXPECTED_VERSION}-'"
+            exit 1
+          fi
+          echo "wheel=${wheel}" >> "$GITHUB_OUTPUT"
+          echo "basename=${basename}" >> "$GITHUB_OUTPUT"
+          echo "Built wheel: ${basename}"
+
+      - name: Tag, release, and upload wheel
+        if: ${{ !inputs.dry-run }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+          SOURCE_REF: ${{ steps.ref.outputs.ref }}
+          WHEEL: ${{ steps.wheel.outputs.wheel }}
+          BASENAME: ${{ steps.wheel.outputs.basename }}
+        run: |
+          set -euo pipefail
+          tag="v${VERSION}"
+
+          # Resolve source-ref to a commit SHA. The caller might have passed a
+          # branch name or short SHA; gh api refs needs a full SHA.
+          sha="$(git rev-parse "${SOURCE_REF}^{commit}")"
+
+          # Create the tag ref. Fails if it already exists -- intentional
+          # immutability. To re-release at a different SHA, delete the tag and
+          # release first (deliberate human action).
+          echo "Creating tag ${tag} at ${sha}"
+          gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f "ref=refs/tags/${tag}" \
+            -f "sha=${sha}"
+
+          # Create the release at that tag with auto-generated notes.
+          echo "Creating release ${tag}"
+          gh release create "${tag}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${tag}" \
+            --generate-notes
+
+          # Upload the wheel. No --clobber: re-uploads must be deliberate.
+          # See build.yml for the same convention and rationale (consumers
+          # may pin asset bytes by SHA-256 fragment).
+          echo "Uploading ${BASENAME} to release ${tag}"
+          gh release upload "${tag}" "${WHEEL}" \
+            --repo "${GITHUB_REPOSITORY}"
+
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/${BASENAME}"
+          echo "Asset URL: ${url}"
+
+      - name: Dry-run summary
+        if: ${{ inputs.dry-run }}
+        env:
+          BASENAME: ${{ steps.wheel.outputs.basename }}
+        run: |
+          echo "::notice::Dry-run: built ${BASENAME}, skipped tag/release/upload."
+          ls -la dist/
