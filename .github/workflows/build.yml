@@ -93,7 +93,7 @@ jobs:
           echo "tag_version=${tag_version}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout caller repo at source-ref
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ steps.ref.outputs.ref }}
           fetch-depth: 1
@@ -103,16 +103,16 @@ jobs:
         # SHA, not this workflow's — we can't use it to pin the auxiliary
         # checkout. Hardcoding the major-version tag is the simplest correct
         # behavior; v3.x patch fixes fast-forward this tag.
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: MultiworldGG/build-and-publish-action
           ref: v3
           path: .build-and-publish-action
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: "3.13"
 
       - name: Install build-time deps
         run: |
