@@ -13,7 +13,7 @@ The matching `MultiworldGG-Index` PR is opened separately by the
 `workflow_run.completed` event. Karen's review checks fire automatically once
 that PR is open. None of that lives in this action.
 
-## Quick start (caller workflow)
+## Quick start — per-world repo
 
 In your per-world repo, create `.github/workflows/make_pyproject.yml`:
 
@@ -33,6 +33,53 @@ jobs:
     # No `with:` needed for single-world repos.
     # No `secrets:` — no Oliver secrets needed.
 ```
+
+## Quick start — pure-Python client repo (flat layout)
+
+For repos that ship a single pip-installable Python package at the repo root
+(a `pyproject.toml` plus a top-level package directory — no `worlds/<apworld>/`
+shape), use the sibling `build-wheel.yml` workflow. It rewrites
+`pyproject.toml:[project].version` in the runner to the input version, builds
+the wheel, tags `v<version>`, creates a GitHub Release, and uploads the wheel
+as an asset. The committed `pyproject.toml` is **not** modified — the workflow
+input is the single source of truth.
+
+In your client repo, create `.github/workflows/release.yml`:
+
+```yaml
+name: Release wheel
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. 0.1.1). Tag will be v<version>."
+        required: true
+        type: string
+      dry-run:
+        description: "Build only -- skip tag, release, and asset upload."
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    uses: MultiworldGG/gen-pymod-release/.github/workflows/build-wheel.yml@v3
+    with:
+      version: ${{ inputs.version }}
+      dry-run: ${{ inputs.dry-run }}
+```
+
+Inputs accepted by `build-wheel.yml`:
+
+| name | required | default | notes |
+|---|---|---|---|
+| `version` | yes | — | Becomes both the tag (`v<version>`) and the wheel's metadata version. |
+| `source-ref` | | `github.sha` | Caller-repo ref to build from. |
+| `python-version` | | `"3.13"` | Build interpreter. Pure-Python wheels are `py3-none-any` regardless. |
+| `dry-run` | | `false` | Build the wheel, skip tag/release/upload. |
 
 ## APWorld resolution
 
@@ -102,7 +149,9 @@ changes cut a new major. Pin to a SHA (`@<full-sha>`) for full reproducibility.
 ## Layout in this action repo
 
 ```
-.github/workflows/build.yml      reusable workflow (workflow_call)
+.github/workflows/
+  build.yml                      per-world reusable workflow (workflow_call) -- worlds/<apworld>/ layout
+  build-wheel.yml                pure-Python reusable workflow (workflow_call) -- flat-layout setuptools repos
 scripts/
   shape_orphan.py                build the temp orphan tree from caller's worlds/<apworld>/
 templates/
