@@ -1,6 +1,6 @@
 name: Build pure-Python wheel and release
 
-# Reusable workflow. Invoked by flat-layout pure-Python setuptools repos like:
+# Reusable workflow for flat-layout pure-Python setuptools repos:
 #
 #   on:
 #     workflow_dispatch:
@@ -11,31 +11,23 @@ name: Build pure-Python wheel and release
 #       uses: MultiworldGG/gen-pymod-release/.github/workflows/build-wheel.yml@v3
 #       with: { version: ${{ inputs.version }} }
 #
-# Rewrites pyproject.toml:[project].version in the runner's checkout to match
-# the input, builds a wheel, creates tag v<version>, creates a GitHub Release,
-# and attaches the wheel as an asset. The committed pyproject.toml is NOT
-# modified -- the workflow input is the single source of truth.
+# Builds and releases a wheel from the requested version. The committed
+# pyproject.toml is not modified.
 
 on:
   workflow_call:
     inputs:
       version:
-        description: |
-          Version to release (e.g. 0.1.1). Tag will be v<version>.
-          pyproject.toml:[project].version is rewritten to match in the runner only.
+        description: Version to release (e.g. 0.1.1); tag is v<version>.
         required: true
         type: string
       source-ref:
-        description: |
-          Git ref of the caller repo to build from. Defaults to the workflow's
-          SHA (the caller workflow's HEAD).
+        description: Git ref of the caller repo to build. Defaults to github.sha.
         required: false
         type: string
         default: ""
       python-version:
-        description: |
-          Python interpreter to use for the build. Pure-Python wheels are
-          cross-version (py3-none-any), so this only affects build tooling.
+        description: Python version for build tooling.
         required: false
         type: string
         default: "3.13"
@@ -97,9 +89,7 @@ jobs:
           from packaging.version import Version, InvalidVersion
 
           raw = os.environ["RAW_VERSION"].strip()
-          # PEP 440 canonicalization. This strips a leading 'v' ('v0.3.0' ->
-          # '0.3.0') and matches whatever setuptools will write into the wheel
-          # filename, so our sanity-check stays in sync with the actual wheel.
+          # Match the version setuptools writes into the wheel filename.
           try:
               canonical = str(Version(raw))
           except InvalidVersion as e:
@@ -145,7 +135,6 @@ jobs:
           wheel="${wheels[0]}"
           basename="$(basename "$wheel")"
           # Wheel filename: {distribution}-{version}-{python tag}-{abi tag}-{platform tag}.whl
-          # Verify the version segment matches the canonical version -- catches a silent rewrite failure.
           if [[ "$basename" != *"-${EXPECTED_VERSION}-"* ]]; then
             echo "::error::wheel '${basename}' does not contain version segment '-${EXPECTED_VERSION}-'"
             exit 1
@@ -166,17 +155,11 @@ jobs:
           set -euo pipefail
           tag="v${VERSION}"
 
-          # Resolve source-ref to a commit SHA. The caller might have passed a
-          # branch name or short SHA; gh api refs needs a full SHA.
+          # source-ref may be a branch name or short SHA.
           sha="$(git rev-parse "${SOURCE_REF}^{commit}")"
 
-          # Create the tag ref, or accept an existing tag if it already points
-          # at the same SHA. The real immutability boundary is the wheel asset
-          # below (no --clobber). The tag-existing case can happen legitimately
-          # when a prior workflow run created the tag but failed before
-          # uploading the wheel.
-          existing_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/refs/tags/${tag}" --jq '.object.sha' 2>/dev/null || true)"
-          if [ -n "${existing_sha}" ]; then
+          # Reuse an existing tag only when it already points at this commit.
+          if existing_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/refs/tags/${tag}" --jq '.object.sha' 2>/dev/null); then
             if [ "${existing_sha}" = "${sha}" ]; then
               echo "Tag ${tag} already exists at ${sha} -- reusing."
             else
@@ -193,9 +176,7 @@ jobs:
               -f "sha=${sha}"
           fi
 
-          # Create the release at that tag, or skip if one already exists.
-          # The wheel-asset upload below is the operation that must be unique;
-          # the release shell can be reused if a prior run created it.
+          # The release may exist from a prior partial run, reuse it if possible.
           if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             echo "Release ${tag} already exists -- skipping create."
           else
