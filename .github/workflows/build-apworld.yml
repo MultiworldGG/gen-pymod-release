@@ -1,0 +1,222 @@
+name: Build per-world .apworld and attach to release
+
+# Reusable workflow. Produces a <slug>.apworld file by running
+# `python Launcher.py "Build APWorlds" -- "<game>" --skip_open_folder`
+# inside a MultiworldGG checkout, then uploads the result as a release asset.
+#
+# Compose alongside build.yml in your per-world repo's make_pyproject.yml:
+#
+#   on: { release: { types: [published] }, workflow_dispatch: {} }
+#   permissions:
+#     contents: write
+#   jobs:
+#     publish-wheel:
+#       uses: MultiworldGG/gen-pymod-release/.github/workflows/build.yml@v3
+#     publish-apworld:
+#       uses: MultiworldGG/gen-pymod-release/.github/workflows/build-apworld.yml@v3
+#       with:
+#         game: "Your Game Name"
+#
+# IMPORTANT — `game` is the World.game *display name* (e.g. "Clique"), not the
+# folder slug (e.g. "clique"). The Launcher's "Build APWorlds" component looks
+# up worlds by display name. The folder slug is inferred from the release tag
+# prefix (same logic as build.yml).
+#
+# NOTE — `mwgg-ref` always resolves against MultiworldGG/MultiworldGG (the
+# canonical monorepo). If you maintain a fork of MultiworldGG/MultiworldGG and
+# have modified Launcher.py itself, you will need to fork this workflow. For
+# all other fork-based world repos, `mwgg-ref: main` (the default) is correct.
+
+on:
+  workflow_call:
+    inputs:
+      game:
+        description: |
+          The world's display name — the value of `World.game` in your Python
+          class (e.g. "Clique"). This is passed directly to
+          `Launcher.py "Build APWorlds" -- "<game>"`.
+        required: true
+        type: string
+      mwgg-ref:
+        description: |
+          Ref of MultiworldGG/MultiworldGG to check out as the Launcher host.
+          Defaults to `main`. Pin to a release tag (e.g. `0.6.1`) for
+          reproducible builds.
+        required: false
+        type: string
+        default: "main"
+      apworld-source-ref:
+        description: |
+          Caller-repo ref to check out as the world source. Resolution order:
+          1. This input, if non-empty.
+          2. The release tag, when the triggering event is `release`.
+          3. `github.sha` (the commit that triggered the workflow).
+        required: false
+        type: string
+        default: ""
+      dry-run:
+        description: Build the .apworld but skip `gh release upload`.
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # for `gh release upload` on the caller repo
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Resolve source-ref
+        id: ref
+        env:
+          INPUT_REF: ${{ inputs.apworld-source-ref }}
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          CTX_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_REF}" ]; then
+            ref="${INPUT_REF}"
+          elif [ "${EVENT_NAME}" = "release" ] && [ -n "${RELEASE_TAG}" ]; then
+            ref="${RELEASE_TAG}"
+          else
+            ref="${CTX_SHA}"
+          fi
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+          echo "Resolved source-ref: ${ref}"
+
+      - name: Resolve apworld slug
+        id: apworld
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if [ "${EVENT_NAME}" = "release" ] && [ -n "${RELEASE_TAG}" ]; then
+            # Tag must be `<apworld>-<world_version>` (e.g. `clique-1.2.3`).
+            if [[ "${RELEASE_TAG}" != *-* ]]; then
+              echo "::error::release tag '${RELEASE_TAG}' has no '-' separator."
+              echo "Tag releases as '<apworld>-<world_version>' (e.g. 'clique-1.2.3')."
+              exit 1
+            fi
+            apworld="${RELEASE_TAG%%-*}"
+            tag_version="${RELEASE_TAG#*-}"
+            if [ -z "${apworld}" ] || [ -z "${tag_version}" ]; then
+              echo "::error::Release tag '${RELEASE_TAG}' did not parse to a non-empty apworld and world_version."
+              exit 1
+            fi
+            echo "Resolved apworld slug from release tag prefix: ${apworld}"
+          else
+            echo "::error::Cannot resolve apworld slug: no release tag is available."
+            echo "This workflow requires a release event (or a non-empty apworld-source-ref pointing at a release tag)."
+            echo "To test without a release, set dry-run: true and push a tag first."
+            exit 1
+          fi
+          echo "apworld=${apworld}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout MultiworldGG at mwgg-ref
+        uses: actions/checkout@v6
+        with:
+          repository: MultiworldGG/MultiworldGG
+          ref: ${{ inputs.mwgg-ref }}
+          path: mwgg
+          fetch-depth: 1
+
+      - name: Checkout caller repo at source-ref
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.ref.outputs.ref }}
+          path: caller
+          fetch-depth: 1
+
+      - name: Overlay caller world onto MultiworldGG checkout
+        env:
+          APWORLD: ${{ steps.apworld.outputs.apworld }}
+        run: |
+          set -euo pipefail
+          src="caller/worlds/${APWORLD}"
+          dst="mwgg/worlds/${APWORLD}"
+          if [ ! -d "${src}" ]; then
+            echo "::error::Expected caller/worlds/${APWORLD}/ to exist after checkout."
+            echo "Make sure your repo has the world source at worlds/${APWORLD}/."
+            exit 1
+          fi
+          # Caller's version wins; remove any copy the canonical MWGG checkout
+          # already ships (many worlds are mirrors in the monorepo).
+          if [ -d "${dst}" ]; then
+            echo "Removing pre-existing ${dst} (canonical MWGG copy; caller's version wins)"
+            rm -rf "${dst}"
+          fi
+          echo "Copying ${src} -> ${dst}"
+          cp -r "${src}" "${dst}"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install MultiworldGG runtime requirements
+        run: |
+          set -euo pipefail
+          cd mwgg
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Build .apworld
+        env:
+          GAME: ${{ inputs.game }}
+        run: |
+          set -euo pipefail
+          cd mwgg
+          python Launcher.py "Build APWorlds" -- "${GAME}" --skip_open_folder
+
+      - name: Verify .apworld was produced
+        id: artifact
+        env:
+          APWORLD: ${{ steps.apworld.outputs.apworld }}
+        run: |
+          set -euo pipefail
+          apworld_path="mwgg/build/apworlds/${APWORLD}.apworld"
+          if [ ! -f "${apworld_path}" ]; then
+            echo "::error::Expected output file '${apworld_path}' was not produced."
+            echo "Check that 'game: ${{ inputs.game }}' exactly matches the World.game attribute."
+            echo "Contents of mwgg/build/apworlds/ (if it exists):"
+            ls -la mwgg/build/apworlds/ 2>/dev/null || echo "(directory not created)"
+            exit 1
+          fi
+          echo "apworld_path=${apworld_path}" >> "$GITHUB_OUTPUT"
+          echo "apworld_basename=${APWORLD}.apworld" >> "$GITHUB_OUTPUT"
+          echo "Artifact: ${apworld_path} ($(du -h "${apworld_path}" | cut -f1))"
+
+      - name: Upload .apworld to release
+        if: ${{ !inputs.dry-run && github.event_name == 'release' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          apworld_path="${{ steps.artifact.outputs.apworld_path }}"
+          echo "Uploading ${{ steps.artifact.outputs.apworld_basename }} to release ${RELEASE_TAG}"
+          # --clobber is intentional for .apworld: the Index does NOT pin a
+          # SHA256 for this asset (only the wheel gets a #sha256= fragment).
+          # Clobber lets authors re-run the workflow after a transient failure
+          # without needing to delete the asset manually first.
+          gh release upload "${RELEASE_TAG}" "${apworld_path}" \
+            --clobber \
+            --repo "${{ github.repository }}"
+          echo "Uploaded: https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/${{ steps.artifact.outputs.apworld_basename }}"
+
+      - name: Non-release / dry-run summary
+        if: ${{ inputs.dry-run || github.event_name != 'release' }}
+        run: |
+          echo "::notice::Skipping release-asset upload (dry-run=${{ inputs.dry-run }}, event=${{ github.event_name }})."
+          echo "Game: ${{ inputs.game }}"
+          echo "Apworld slug: ${{ steps.apworld.outputs.apworld }}"
+          echo "Source ref: ${{ steps.ref.outputs.ref }}"
+          echo "Built artifact: ${{ steps.artifact.outputs.apworld_path }}"
+          echo ""
+          echo "Contents of mwgg/build/apworlds/:"
+          ls -la mwgg/build/apworlds/ || true
