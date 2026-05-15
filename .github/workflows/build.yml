@@ -66,30 +66,24 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
-          tag_version=""
-          if [ "${EVENT_NAME}" = "release" ] && [ -n "${RELEASE_TAG}" ]; then
-            # Multi-world fallback: tag must be `<apworld>-<world_version>`
-            # (e.g. `generic-1.2.3`).
-            if [[ "${RELEASE_TAG}" != *-* ]]; then
-              echo "::error::release tag '${RELEASE_TAG}' has no '-' separator."
-              echo "Tag releases as '<apworld>-<world_version>' (e.g. 'generic-1.2.3')."
-              exit 1
-            fi
-            apworld="${RELEASE_TAG%%-*}"
-            tag_version="${RELEASE_TAG#*-}"
-            if [ -z "${apworld}" ] || [ -z "${tag_version}" ]; then
-              echo "::error::Release tag '${RELEASE_TAG}' did not parse to a non-empty apworld and world_version."
-              exit 1
-            fi
-            echo "Resolved apworld from release tag prefix: ${apworld} (tag-declared version=${tag_version})"
-          else
-            echo "::error::Cannot resolve apworld: vars.WORLD_FOLDER_NAME is unset and no release tag is available."
-            echo "Set repo variable WORLD_FOLDER_NAME, or invoke this workflow on a release event."
+          if [ "${EVENT_NAME}" != "release" ] || [ -z "${RELEASE_TAG}" ]; then
+            echo "::error::Cannot resolve apworld: this workflow only runs on release events. The slug is parsed from the release tag prefix '<apworld>-<world_version>'."
             exit 1
           fi
+          # Tag must be `<apworld>-<world_version>` (e.g. `generic-1.2.3`).
+          if [[ "${RELEASE_TAG}" != *-* ]]; then
+            echo "::error::release tag '${RELEASE_TAG}' has no '-' separator."
+            echo "Tag releases as '<apworld>-<world_version>' (e.g. 'generic-1.2.3')."
+            exit 1
+          fi
+          apworld="${RELEASE_TAG%%-*}"
+          tag_version="${RELEASE_TAG#*-}"
+          if [ -z "${apworld}" ] || [ -z "${tag_version}" ]; then
+            echo "::error::Release tag '${RELEASE_TAG}' did not parse to a non-empty apworld and world_version."
+            exit 1
+          fi
+          echo "Resolved apworld from release tag prefix: ${apworld} (tag-declared version=${tag_version})"
           echo "apworld=${apworld}" >> "$GITHUB_OUTPUT"
-          # tag_version is empty when apworld came from WORLD_FOLDER_NAME — the
-          # version-skew step below treats empty as "skip the check".
           echo "tag_version=${tag_version}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout caller repo at source-ref
@@ -146,7 +140,6 @@ jobs:
           echo "World version: ${world_version}"
 
       - name: Verify tag-declared version matches archipelago.json
-        if: ${{ steps.apworld.outputs.tag_version != '' }}
         env:
           TAG_VERSION: ${{ steps.apworld.outputs.tag_version }}
           ARCH_VERSION: ${{ steps.shape.outputs.world_version }}
