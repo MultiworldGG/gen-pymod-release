@@ -33,6 +33,7 @@ import ast
 import datetime
 import json
 import logging
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -371,6 +372,123 @@ def parse_client_entry_points(world_dir: Path, apworld: str) -> list[tuple[str, 
     return results
 
 
+# pip-only directive flags (anything after these on the line is not a PEP 508 spec).
+# Source: https://pip.pypa.io/en/stable/reference/requirements-file-format/
+_PIP_DIRECTIVE_FLAGS_SKIP = frozenset({
+    "-r", "--requirement",
+    "-c", "--constraint",
+    "-e", "--editable",
+    "-i", "--index-url",
+    "--extra-index-url",
+    "--find-links",
+    "--no-index",
+    "--no-binary",
+    "--only-binary",
+    "--pre",
+    "--trusted-host",
+    "--use-feature",
+})
+_PIP_DIRECTIVE_FLAGS_WARN = frozenset({"-r", "--requirement", "-c", "--constraint",
+                                        "-e", "--editable"})
+# Per-line pip options that follow the requirement spec (split off, keep the spec).
+_PIP_OPTION_PREFIXES = ("--hash=", "--global-option=", "--config-settings=",
+                        "--install-option=")
+
+
+def _canonical_dist_name(spec: str) -> str:
+    """Extract and PEP 503-normalize the distribution name from a PEP 508 spec.
+
+    Stdlib only — does not pull in `packaging`. Handles `pkg`, `pkg[extra]`,
+    `pkg==1`, `pkg>=1,<2`, `pkg @ url`, `pkg ; marker`. Returns "" if the
+    spec doesn't start with an identifier.
+    """
+    s = spec.strip()
+    m = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)", s)
+    if not m:
+        return ""
+    return re.sub(r"[-_.]+", "-", m.group(1)).lower()
+
+
+def _has_setuptools(deps: list[str]) -> bool:
+    return any(_canonical_dist_name(d) == "setuptools" for d in deps)
+
+
+def parse_requirements_txt(path: Path) -> list[str]:
+    """Parse a pip `requirements.txt` into a list of PEP 508 spec strings.
+
+    Strips comments, joins backslash-continuation lines, drops per-line pip
+    options (`--hash=`, `--global-option=`, etc.) that aren't valid PEP 508,
+    and skips pip-only directive lines (`-r`, `-c`, `-e`, index/find-links
+    flags). Logs `::warning::` for the directive flags an author might
+    reasonably expect to work (`-r`, `-c`, `-e`) so it's not silently dropped.
+
+    Stdlib only — does not import `pip` or `packaging`. Each returned string
+    is meant to be dropped directly into pyproject `[project].dependencies`,
+    which setuptools parses per PEP 621 (PEP 508 grammar including direct
+    references like `pkg @ git+https://…` and env markers like
+    `; python_version == '3.13'`).
+    """
+    text = path.read_text(encoding="utf-8")
+    # Join backslash continuations into single logical lines.
+    text = re.sub(r"\\\r?\n", " ", text)
+
+    deps: list[str] = []
+    for raw_line in text.splitlines():
+        # Per pip's parser, `#` starts a comment only when preceded by
+        # whitespace (or at column 0). A bare `#` mid-token is a URL fragment
+        # — e.g. `pkg @ git+https://host/repo@sha#egg=name`.
+        line = re.split(r"(?:^|\s)#", raw_line, maxsplit=1)[0].strip()
+        if not line:
+            continue
+        first_token = line.split(None, 1)[0]
+        if first_token in _PIP_DIRECTIVE_FLAGS_SKIP:
+            if first_token in _PIP_DIRECTIVE_FLAGS_WARN:
+                logging.warning(
+                    "::warning::requirements.txt %s: skipping pip directive %r — "
+                    "pyproject [project].dependencies only accepts PEP 508 specs.",
+                    path, first_token,
+                )
+            continue
+        # Split off trailing pip-only per-line options.
+        # Split on whitespace; rebuild only the tokens that aren't pip options.
+        kept: list[str] = []
+        for tok in line.split():
+            if any(tok.startswith(p) for p in _PIP_OPTION_PREFIXES):
+                break  # all subsequent tokens are pip options too (hash chains)
+            kept.append(tok)
+        spec = " ".join(kept).strip()
+        if spec:
+            deps.append(spec)
+    return deps
+
+
+def scan_for_pkg_resources(world_dir: Path) -> bool:
+    """True if any `.py` under `world_dir` imports `pkg_resources`.
+
+    `pkg_resources` ships with setuptools but is not in the stdlib — worlds
+    that import it need `setuptools` declared as a runtime dep or they
+    ImportError at module load. AST-based to avoid false positives from
+    comments / strings.
+    """
+    for py_file in world_dir.rglob("*.py"):
+        try:
+            tree = ast.parse(py_file.read_text(encoding="utf-8"))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                if any(alias.name == "pkg_resources"
+                       or alias.name.startswith("pkg_resources.")
+                       for alias in node.names):
+                    return True
+            elif isinstance(node, ast.ImportFrom):
+                if node.module == "pkg_resources" or (
+                    node.module and node.module.startswith("pkg_resources.")
+                ):
+                    return True
+    return False
+
+
 def select_or_render_pyproject(
     *,
     caller_world_dir: Path,
@@ -378,6 +496,7 @@ def select_or_render_pyproject(
     archipelago_json: dict,
     templates_dir: Path,
     client_entry_points: list[tuple[str, str]],
+    requirements_deps: list[str],
 ) -> str:
     """Return the pyproject.toml text for the orphan branch.
 
@@ -388,6 +507,14 @@ def select_or_render_pyproject(
     In both paths, statically-discovered `mwgg.client` entry points are
     injected only when the caller hasn't already declared its own — the
     caller's declaration always wins.
+
+    `requirements_deps` are PEP 508 specs sourced from
+    `worlds/<apworld>/requirements.txt` (plus the auto-injected `setuptools`
+    when the world imports `pkg_resources`). They land in
+    `[project].dependencies`. If the caller's pyproject already declares
+    `[project].dependencies`, the caller wins and we emit a `::warning::`
+    that requirements.txt was ignored — matches the precedence policy used
+    for `version`/`authors`.
     """
     caller_pyproject = caller_world_dir / "pyproject.toml"
     world_version = str(archipelago_json.get("world_version", "")).strip()
@@ -403,6 +530,21 @@ def select_or_render_pyproject(
             return  # caller already declared their own — don't second-guess
         entry_points["mwgg.client"] = {k: v for k, v in client_entry_points}
 
+    def _inject_dependencies(data: dict, *, caller_has_pyproject: bool) -> None:
+        if not requirements_deps:
+            return
+        project = data.setdefault("project", {})
+        existing = project.get("dependencies")
+        if caller_has_pyproject and existing:
+            logging.warning(
+                "::warning::%s ships pyproject.toml with [project].dependencies AND "
+                "a requirements.txt. Caller's pyproject wins; requirements.txt entries "
+                "(%s) are ignored. Remove one to silence this warning.",
+                apworld, ", ".join(requirements_deps),
+            )
+            return
+        project["dependencies"] = list(requirements_deps)
+
     if caller_pyproject.is_file():
         with open(caller_pyproject, "rb") as f:
             data = tomllib.load(f)
@@ -416,17 +558,18 @@ def select_or_render_pyproject(
         # the orphan branch's project.description in sync.
         project["description"] = f"MultiWorld: {game_name}"
         _inject_entry_points(data)
+        _inject_dependencies(data, caller_has_pyproject=True)
         if _HAS_TOMLI_W:
             return tomli_w.dumps(data)
         # No tomli_w available — emit the original text unchanged but warn.
         print(
             "::warning::tomli_w not available; emitting caller's pyproject.toml verbatim "
-            "(version/authors injection skipped). pip install tomli_w in the workflow.",
+            "(version/authors/dependencies injection skipped). pip install tomli_w in the workflow.",
             file=sys.stderr,
         )
         return caller_pyproject.read_text(encoding="utf-8")
 
-    # Fallback: render the bundled template, then re-parse and inject entry points.
+    # Fallback: render the bundled template, then re-parse and inject entry points + deps.
     rendered = render_jinja_template(
         templates_dir / "pyproject.toml.j2",
         apworld=apworld,
@@ -434,16 +577,18 @@ def select_or_render_pyproject(
         game_name=game_name,
         authors=authors,
     )
-    if client_entry_points and _HAS_TOMLI_W:
+    needs_rewrite = (client_entry_points or requirements_deps) and _HAS_TOMLI_W
+    if needs_rewrite:
         try:
             data = tomllib.loads(rendered)
         except tomllib.TOMLDecodeError as exc:
             logging.warning(
                 "Could not re-parse the rendered fallback pyproject.toml to inject "
-                "mwgg.client entry points; the wheel will be missing them: %s", exc,
+                "entry points / dependencies; the wheel may be missing them: %s", exc,
             )
             return rendered
         _inject_entry_points(data)
+        _inject_dependencies(data, caller_has_pyproject=False)
         return tomli_w.dumps(data)
     return rendered
 
@@ -487,12 +632,27 @@ def shape(
 
     client_entry_points = parse_client_entry_points(copied_world_dir, apworld)
 
+    requirements_path = caller_world_dir / "requirements.txt"
+    requirements_deps = (
+        parse_requirements_txt(requirements_path)
+        if requirements_path.is_file() else []
+    )
+    if scan_for_pkg_resources(copied_world_dir) and not _has_setuptools(requirements_deps):
+        logging.warning(
+            "::warning::%s imports pkg_resources but does not declare setuptools "
+            "in requirements.txt. Auto-injecting setuptools into [project].dependencies. "
+            "Add `setuptools` to worlds/%s/requirements.txt to silence this warning.",
+            apworld, apworld,
+        )
+        requirements_deps.append("setuptools")
+
     pyproject_text = select_or_render_pyproject(
         caller_world_dir=caller_world_dir,
         apworld=apworld,
         archipelago_json=archipelago_json,
         templates_dir=templates_dir,
         client_entry_points=client_entry_points,
+        requirements_deps=requirements_deps,
     )
     (output_dir / "pyproject.toml").write_text(pyproject_text, encoding="utf-8")
 
@@ -532,6 +692,7 @@ def shape(
         "client_entry_points": [
             {"name": k, "target": v} for k, v in client_entry_points
         ],
+        "dependencies": list(requirements_deps),
     }
     (output_dir / ".shape_info.json").write_text(
         json.dumps(shape_info, indent=2) + "\n", encoding="utf-8",
@@ -548,6 +709,12 @@ def shape(
             print(f"    {k} = {v}")
     else:
         print("  mwgg.client entry points: (none found)")
+    if requirements_deps:
+        print(f"  dependencies:    {len(requirements_deps)}")
+        for dep in requirements_deps:
+            print(f"    {dep}")
+    else:
+        print("  dependencies:    (none)")
 
 
 def _cli(argv: Optional[list[str]] = None) -> int:
