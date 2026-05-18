@@ -1,4 +1,4 @@
-name: Build pure-Python wheel and release
+name: Build python module whl of APWorld
 
 # Reusable workflow for flat-layout pure-Python setuptools repos:
 #
@@ -10,6 +10,15 @@ name: Build pure-Python wheel and release
 #     publish:
 #       uses: MultiworldGG/gen-pymod-release/.github/workflows/build-wheel.yml@v3
 #       with: { version: ${{ inputs.version }} }
+#
+# Trigger model (distinct from build.yml / build-apworld.yml):
+#   This workflow shapes its own release — it creates the tag, creates the
+#   GitHub Release, and uploads the wheel from the given version. Caller
+#   workflow_dispatch is the normal trigger here, not a power-user path.
+#   It is NOT the APWorld release flow; APWorld repos should use the
+#   helper + draft + release: published path documented in build-apworld.yml
+#   and build.yml. Oliver picks up published releases by watching for the
+#   .whl, regardless of which reusable workflow uploaded it.
 #
 # Builds and releases a wheel from the requested version. The committed
 # pyproject.toml is not modified.
