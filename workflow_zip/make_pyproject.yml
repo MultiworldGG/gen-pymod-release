@@ -1,0 +1,308 @@
+name: Create and Release Python Package
+
+# Builds worlds/<slug>/ as a Python wheel and uploads it as an asset on a
+# release tagged <slug>-<version> (e.g. "myclgm-1.2.3"). The shape/build
+# scripts live under tools/build/ in this same repository.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      slug:
+        description: "World folder name under worlds/<slug>/. Required for manual runs."
+        required: false
+        type: string
+        default: ""
+      game:
+        description: "World.game display name (manual runs only; release events read tools/build/games.json)."
+        required: false
+        type: string
+        default: ""
+      release-tag:
+        description: "Existing GitHub Release tag to upload assets to (manual runs only)."
+        required: false
+        type: string
+        default: ""
+      source-ref:
+        description: "Git ref to build from. Defaults to release tag, then current SHA."
+        required: false
+        type: string
+        default: ""
+      dry-run:
+        description: "Skip the release-asset upload; just shape and build."
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  wheel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Resolve release-tag
+        id: release
+        env:
+          INPUT_RELEASE_TAG: ${{ inputs.release-tag }}
+          EVENT_RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_RELEASE_TAG}" ]; then
+            release_tag="${INPUT_RELEASE_TAG}"
+          elif [ -n "${EVENT_RELEASE_TAG}" ]; then
+            release_tag="${EVENT_RELEASE_TAG}"
+          else
+            release_tag=""
+          fi
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve source-ref
+        id: ref
+        env:
+          INPUT_REF: ${{ inputs.source-ref }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+          CTX_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_REF}" ]; then
+            ref="${INPUT_REF}"
+          elif [ -n "${RELEASE_TAG}" ]; then
+            ref="${RELEASE_TAG}"
+          else
+            ref="${CTX_SHA}"
+          fi
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve slug
+        id: slug
+        env:
+          INPUT_SLUG: ${{ inputs.slug }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          tag_version=""
+          if [ -n "${RELEASE_TAG}" ]; then
+            if [[ "${RELEASE_TAG}" != *-* ]]; then
+              echo "::error::release tag '${RELEASE_TAG}' has no '-' separator."
+              echo "Tag releases as '<slug>-<version>' (e.g. 'generic-1.2.3')."
+              exit 1
+            fi
+            slug="${RELEASE_TAG%%-*}"
+            tag_version="${RELEASE_TAG#*-}"
+            if [ -z "${slug}" ] || [ -z "${tag_version}" ]; then
+              echo "::error::Release tag '${RELEASE_TAG}' did not parse to a non-empty slug and version."
+              exit 1
+            fi
+          elif [ -n "${INPUT_SLUG}" ]; then
+            slug="${INPUT_SLUG}"
+          else
+            echo "::error::Cannot resolve slug: non-release runs must pass the 'slug' workflow input."
+            exit 1
+          fi
+          echo "slug=${slug}" >> "$GITHUB_OUTPUT"
+          echo "tag_version=${tag_version}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout repo at source-ref
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.ref.outputs.ref }}
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install build-time deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install tomli_w build
+
+      - name: Shape module tree
+        id: shape
+        run: |
+          set -euo pipefail
+          python tools/build/scripts/shape_tree.py \
+            --source-root . \
+            --apworld "${{ steps.slug.outputs.slug }}" \
+            --templates-dir tools/build/templates \
+            --output-dir .orphan-tree \
+            --caller-repo "${{ github.repository }}" \
+            --source-ref "${{ steps.ref.outputs.ref }}"
+          world_version=$(python -c "
+          import json
+          print(json.load(open('.orphan-tree/.shape_info.json', encoding='utf-8'))['world_version'])
+          ")
+          echo "world_version=${world_version}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify tag version matches archipelago.json
+        if: ${{ steps.release.outputs.release_tag != '' }}
+        env:
+          TAG_VERSION: ${{ steps.slug.outputs.tag_version }}
+          ARCH_VERSION: ${{ steps.shape.outputs.world_version }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+          SLUG: ${{ steps.slug.outputs.slug }}
+        run: |
+          set -euo pipefail
+          if [ "${TAG_VERSION}" != "${ARCH_VERSION}" ]; then
+            echo "::error::Release tag '${RELEASE_TAG}' parses to '${TAG_VERSION}', but worlds/${SLUG}/archipelago.json says world_version='${ARCH_VERSION}'."
+            exit 1
+          fi
+
+      - name: Build wheel
+        run: |
+          set -euo pipefail
+          (cd .orphan-tree && python -m build --wheel)
+          ls -la .orphan-tree/dist/
+
+      - name: Upload wheel to release
+        if: ${{ !inputs.dry-run && steps.release.outputs.release_tag != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          wheels=(.orphan-tree/dist/*.whl)
+          if [ ${#wheels[@]} -ne 1 ]; then
+            echo "::error::expected exactly one wheel under .orphan-tree/dist/, got ${#wheels[@]}"
+            exit 1
+          fi
+          gh release upload "${RELEASE_TAG}" "${wheels[0]}" --repo "${{ github.repository }}"
+
+      - name: Dry-run summary
+        if: ${{ inputs.dry-run || steps.release.outputs.release_tag == '' }}
+        run: |
+          echo "::notice::Skipping upload (dry-run=${{ inputs.dry-run }}, release-tag=${{ steps.release.outputs.release_tag }})."
+          ls -la .orphan-tree/dist/ || true
+
+  apworld:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Resolve release-tag, source-ref, slug
+        id: resolve
+        env:
+          INPUT_RELEASE_TAG: ${{ inputs.release-tag }}
+          EVENT_RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_REF: ${{ inputs.source-ref }}
+          INPUT_SLUG: ${{ inputs.slug }}
+          INPUT_GAME: ${{ inputs.game }}
+          CTX_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_RELEASE_TAG}" ]; then
+            release_tag="${INPUT_RELEASE_TAG}"
+          elif [ -n "${EVENT_RELEASE_TAG}" ]; then
+            release_tag="${EVENT_RELEASE_TAG}"
+          else
+            release_tag=""
+          fi
+          if [ -n "${INPUT_REF}" ]; then
+            ref="${INPUT_REF}"
+          elif [ -n "${release_tag}" ]; then
+            ref="${release_tag}"
+          else
+            ref="${CTX_SHA}"
+          fi
+          if [ -n "${release_tag}" ]; then
+            if [[ "${release_tag}" != *-* ]]; then
+              echo "::error::release tag '${release_tag}' has no '-' separator."
+              exit 1
+            fi
+            slug="${release_tag%%-*}"
+          elif [ -n "${INPUT_SLUG}" ]; then
+            slug="${INPUT_SLUG}"
+          else
+            echo "::error::Cannot resolve slug for apworld job."
+            exit 1
+          fi
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+          echo "slug=${slug}" >> "$GITHUB_OUTPUT"
+          echo "input_game=${INPUT_GAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout fork at source-ref
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.resolve.outputs.ref }}
+          fetch-depth: 1
+
+      - name: Resolve World.game display name
+        id: game
+        env:
+          INPUT_GAME: ${{ steps.resolve.outputs.input_game }}
+          SLUG: ${{ steps.resolve.outputs.slug }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_GAME}" ]; then
+            game="${INPUT_GAME}"
+          else
+            game=$(python -c "
+          import json, os, sys
+          slug = os.environ['SLUG']
+          m = json.load(open('tools/build/games.json', encoding='utf-8'))
+          v = m.get(slug)
+          if not v:
+              sys.exit(f\"slug {slug!r} not found in tools/build/games.json\")
+          print(v)
+          ")
+          fi
+          echo "game=${game}" >> "$GITHUB_OUTPUT"
+          echo "Resolved World.game: ${game}"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install fork runtime requirements
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Build .apworld via fork's Launcher.py
+        env:
+          GAME: ${{ steps.game.outputs.game }}
+        run: |
+          set -euo pipefail
+          python Launcher.py "Build APWorlds" -- "${GAME}" --skip_open_folder
+
+      - name: Verify .apworld was produced
+        id: artifact
+        env:
+          SLUG: ${{ steps.resolve.outputs.slug }}
+        run: |
+          set -euo pipefail
+          apworld_path="build/apworlds/${SLUG}.apworld"
+          if [ ! -f "${apworld_path}" ]; then
+            echo "::error::Expected '${apworld_path}' was not produced."
+            echo "Check that the 'game' value matches the World.game attribute exactly."
+            ls -la build/apworlds/ 2>/dev/null || echo "(build/apworlds/ not created)"
+            exit 1
+          fi
+          echo "apworld_path=${apworld_path}" >> "$GITHUB_OUTPUT"
+          echo "apworld_basename=${SLUG}.apworld" >> "$GITHUB_OUTPUT"
+
+      - name: Upload .apworld to release
+        if: ${{ !inputs.dry-run && steps.resolve.outputs.release_tag != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.resolve.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          gh release upload "${RELEASE_TAG}" "${{ steps.artifact.outputs.apworld_path }}" \
+            --clobber \
+            --repo "${{ github.repository }}"
+
+      - name: Dry-run summary
+        if: ${{ inputs.dry-run || steps.resolve.outputs.release_tag == '' }}
+        run: |
+          echo "::notice::Skipping upload (dry-run=${{ inputs.dry-run }}, release-tag=${{ steps.resolve.outputs.release_tag }})."
+          ls -la build/apworlds/ || true

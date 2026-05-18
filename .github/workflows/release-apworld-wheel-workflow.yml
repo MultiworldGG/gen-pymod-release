@@ -1,0 +1,151 @@
+name: Release apworld-wheel-workflow
+
+# Bundles the four files needed for a self-contained per-world build into a
+# single .zip and attaches it to a GitHub Release. Three of those files are
+# the canonical scripts/templates already in this repo; the fourth is the
+# drop-in workflow under workflow_zip/.
+#
+# The release is the public distribution point for maintainers who want the
+# per-fork drop-in workflow without referencing this repo at runtime.
+#
+# Triggers:
+#   - workflow_dispatch: pass a tag to attach to (creates the tag + release
+#     at the current commit if they don't exist).
+#   - push of a tag matching `apworld-wheel-workflow-*`: builds + uploads to
+#     the auto-created release.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to attach the bundle to (e.g. apworld-wheel-workflow-1.0.0). Created at the current commit if missing."
+        required: true
+        type: string
+  push:
+    tags:
+      - "apworld-wheel-workflow-*"
+
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Resolve tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          PUSHED_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_TAG}" ]; then
+            tag="${INPUT_TAG}"
+          elif [[ "${PUSHED_REF}" == refs/tags/* ]]; then
+            tag="${PUSHED_REF#refs/tags/}"
+          else
+            echo "::error::No tag input and no tag ref on push."
+            exit 1
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Verify all four bundle source files are present
+        run: |
+          set -euo pipefail
+          missing=0
+          for f in \
+            workflow_zip/make_pyproject.yml \
+            scripts/shape_tree.py \
+            templates/README.md.j2 \
+            templates/pyproject.toml.j2
+          do
+            if [ ! -f "$f" ]; then
+              echo "::error::missing $f"
+              missing=1
+            fi
+          done
+          [ $missing -eq 0 ]
+
+      - name: Stage bundle tree
+        id: stage
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Tag already carries the `apworld-wheel-workflow-` prefix, so the
+          # bundle directory and zip filename are simply the tag.
+          bundle="${TAG}"
+          # Mirror the on-disk layout the maintainer should end up with after
+          # unzipping at the root of their fork.
+          mkdir -p "${bundle}/.github/workflows"
+          mkdir -p "${bundle}/tools/build/scripts"
+          mkdir -p "${bundle}/tools/build/templates"
+          cp workflow_zip/make_pyproject.yml   "${bundle}/.github/workflows/make_pyproject.yml"
+          cp scripts/shape_tree.py             "${bundle}/tools/build/scripts/shape_tree.py"
+          cp templates/README.md.j2            "${bundle}/tools/build/templates/README.md.j2"
+          cp templates/pyproject.toml.j2       "${bundle}/tools/build/templates/pyproject.toml.j2"
+          # games.json stub so the maintainer sees the shape they need to fill in.
+          cat > "${bundle}/tools/build/games.json" <<'JSON'
+          {
+            "_comment": "Map your worlds/<slug>/ directory names to the World.game display name (the value of World.game on your Python class). Required for release-event builds of the .apworld.",
+            "example-slug": "Example Game Display Name"
+          }
+          JSON
+          zip -r "${bundle}.zip" "${bundle}"
+          echo "zip=${bundle}.zip" >> "$GITHUB_OUTPUT"
+          ls -la "${bundle}.zip"
+
+      - name: Create tag if missing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          sha="${GITHUB_SHA}"
+          if existing_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" --jq '.object.sha' 2>/dev/null); then
+            if [ "${existing_sha}" = "${sha}" ]; then
+              echo "Tag ${TAG} already at ${sha} -- reusing."
+            else
+              echo "::error::Tag ${TAG} exists at ${existing_sha} but workflow ran at ${sha}. Refusing to move the tag."
+              exit 1
+            fi
+          else
+            echo "Creating tag ${TAG} at ${sha}"
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f "ref=refs/tags/${TAG}" \
+              -f "sha=${sha}"
+          fi
+
+      - name: Create release if missing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists -- reusing."
+          else
+            echo "Creating release ${TAG}"
+            gh release create "${TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${TAG}" \
+              --notes "Self-contained apworld wheel + apworld build workflow bundle. Unzip the contents at the root of your Archipelago fork."
+          fi
+
+      - name: Upload bundle .zip
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          ZIP: ${{ steps.stage.outputs.zip }}
+        run: |
+          set -euo pipefail
+          # No --clobber: re-issuing a bundle for the same tag must be deliberate.
+          gh release upload "${TAG}" "${ZIP}" --repo "${GITHUB_REPOSITORY}"
+          echo "Asset: https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${ZIP}"
