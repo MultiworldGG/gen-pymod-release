@@ -13,20 +13,35 @@ Reusable GitHub workflow for per-world MultiworldGG repos. When you want to rele
 3. Uploads the wheel as an asset on the GitHub release
 
 The matching `MultiworldGG-Index` PR is opened separately by the
-**Oliver-Multiworld-Squirrel** GitHub App when it sees this workflow's
-`workflow_run.completed` event. Karen's review checks fire automatically once
-that PR is open. None of that lives in this action.
+**Oliver-Multiworld-Squirrel** GitHub App after the completed release is
+published. Karen's review checks fire automatically once that PR is open. None
+of that lives in this action.
 
 ## Quick start — per-world repo
 
-In your per-world repo, create `.github/workflows/make_pyproject.yml`:
+In your per-world repo, create `.github/workflows/make_pyproject.yml`. The
+workflow can still respond to published releases, but the recommended path is
+to let the helper dispatch it against an existing draft before publication:
 
 ```yaml
 name: Create and Release Python Package
 on:
   release:
     types: [published]
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      release-tag:
+        description: "Existing draft release tag, e.g. myclgm-1.2.3"
+        required: true
+        type: string
+      source-ref:
+        description: "Git ref to build. Defaults to release-tag."
+        required: false
+        type: string
+      apworld:
+        description: "World folder slug, e.g. myclgm"
+        required: false
+        type: string
 
 permissions:
   contents: write   # for `gh release upload`
@@ -34,9 +49,28 @@ permissions:
 jobs:
   publish:
     uses: MultiworldGG/gen-pymod-release/.github/workflows/build.yml@v3
-    # No `with:` needed for single-world repos.
-    # No `secrets:` — no Oliver secrets needed.
+    with:
+      release-tag: ${{ inputs['release-tag'] || github.event.release.tag_name }}
+      source-ref: ${{ inputs['source-ref'] || inputs['release-tag'] || github.event.release.tag_name }}
+      apworld: ${{ inputs.apworld }}
 ```
+
+Then run the draft-release helper from your world repo:
+
+```bash
+python /path/to/gen-pymod-release/scripts/prepare_apworld_release.py \
+  --apworld myclgm \
+  --version 1.2.3 \
+  --notes RELEASE_NOTES.md \
+  --open
+```
+
+The helper reads `worlds/<apworld>/archipelago.json`, persists `repo_url`,
+normalizes `world_version`, commits that manifest metadata, pushes the branch
+and `<apworld>-<world_version>` tag, creates or reuses a draft GitHub Release,
+dispatches `make_pyproject.yml`, waits for it, and verifies that the draft has
+exactly one wheel asset. Review the attached assets in GitHub and click
+**Publish**. Wheel uploads intentionally do not use `--clobber`.
 
 ## Quick start — pure-Python client repo (flat layout)
 
@@ -87,15 +121,22 @@ Inputs accepted by `build-wheel.yml`:
 
 ## APWorld resolution
 
-**Release tag prefix `<apworld>-<world_version>`**: The action requires the release event and
-   parses the apworld from the tag. Tag your release as e.g. `generic-1.2.3`
-   to publish `worlds/generic/` at `1.2.3`. This is the recommended path
-   for repos that ship multiple worlds out of one repo (such as
-   [TheLX5/Archipelago](https://github.com/TheLX5/Archipelago/)).
+**Release tag prefix `<apworld>-<world_version>`**: On release events, the
+action parses the apworld from the tag. Tag your release as e.g.
+`generic-1.2.3` to publish `worlds/generic/` at `1.2.3`.
+
+**Draft releases:** Use `scripts/prepare_apworld_release.py` to create the tag
+and draft release, then dispatch the caller workflow with `release-tag` so the
+wheel and optional `.apworld` are attached before publication.
+
+**Manual dry-runs:** If your caller workflow exposes `workflow_dispatch`, pass
+the `apworld` input and set `dry-run: true`. If you pass `release-tag`, uploads
+target that release; without `release-tag`, the workflow builds only and skips
+release upload.
 
 The Oliver-Multiworld-Squirrel GitHub App must also be installed on your repo
-(read-only) so it can see the `workflow_run.completed` event and open the
-Index PR on your behalf. Install it from
+(read-only) so it can see the published release and open the Index PR on your
+behalf. Install it from
 <https://github.com/apps/oliver-multiworld-squirrel>.
 
 ## Building a `.apworld` alongside the wheel
@@ -105,14 +146,27 @@ It is built by `Launcher.py "Build APWorlds"` and is separate from the
 pip-installable wheel that Oliver consumes for the Index PR.
 
 Add a second job to your `make_pyproject.yml` to produce both artifacts from
-a single release:
+a single draft release:
 
 ```yaml
 name: Create and Release Python Package
 on:
   release:
     types: [published]
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      release-tag:
+        description: "Existing draft release tag, e.g. myclgm-1.2.3"
+        required: true
+        type: string
+      source-ref:
+        description: "Git ref to build. Defaults to release-tag."
+        required: false
+        type: string
+      apworld:
+        description: "World folder slug, e.g. myclgm"
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -120,10 +174,17 @@ permissions:
 jobs:
   publish-wheel:
     uses: MultiworldGG/gen-pymod-release/.github/workflows/build.yml@v3
+    with:
+      release-tag: ${{ inputs['release-tag'] || github.event.release.tag_name }}
+      source-ref: ${{ inputs['source-ref'] || inputs['release-tag'] || github.event.release.tag_name }}
+      apworld: ${{ inputs.apworld }}
   publish-apworld:
     uses: MultiworldGG/gen-pymod-release/.github/workflows/build-apworld.yml@v3
     with:
       game: "Your Game Name"
+      release-tag: ${{ inputs['release-tag'] || github.event.release.tag_name }}
+      source-ref: ${{ inputs['source-ref'] || inputs['release-tag'] || github.event.release.tag_name }}
+      apworld: ${{ inputs.apworld }}
 ```
 
 `publish-wheel` is what Oliver consumes (the wheel URL gets a `#sha256=` pin in
@@ -134,9 +195,13 @@ directly into `custom_worlds/`. Drop either job if you do not need it.
 
 | name | required | default | notes |
 |---|---|---|---|
-| `game` | **yes** | — | The world's display name — the value of `World.game` in your Python class (e.g. `"Clique"`). Must match exactly; the Launcher looks worlds up by display name. |
-| `mwgg-ref` | | `"main"` | Ref of `MultiworldGG/MultiworldGG` to check out as the Launcher host. Pin to a release tag (e.g. `"0.6.1"`) for reproducibility. Always resolves against the canonical monorepo, not your fork. |
-| `apworld-source-ref` | | release tag, else `github.sha` | Caller-repo ref to check out for the world source. Same resolution order as `build.yml`'s `source-ref`. |
+| `game` | **yes** | — | The world's display name — the value of `World.game` in your Python class (e.g. `"My Cool Game"`). Must match exactly; the Launcher looks worlds up by display name. |
+| `mwgg-ref` | | `"main"` | Ref of `MultiworldGG/MultiworldGG` to check out as the Launcher host. Pin to a release tag (e.g. `"0.6.1"`) for reproducibility. Always resolves against the canonical monorepo, not your fork. Ignored when `from-fork: true`. |
+| `from-fork` | | `false` | Set to `true` when calling from an Archipelago fork (a full source tree with its own `Launcher.py`). Skips the canonical MWGG checkout and builds from the caller's own tree; `mwgg-ref` is ignored. |
+| `release-tag` | | `""` | Existing GitHub Release tag to upload to. Required for pre-publication draft uploads from caller `workflow_dispatch`; release events default from `github.event.release.tag_name`. |
+| `source-ref` | | release tag, else `github.sha` | Caller-repo ref to check out for the world source. Prefer this input for new callers. |
+| `apworld` | | `""` | World folder slug under `worlds/`. Ignored on release events, where the slug is parsed from the release tag. Required for manual/non-release dry-runs. |
+| `apworld-source-ref` | | release tag, else `github.sha` | Legacy alias for `source-ref`; kept for existing callers. |
 | `dry-run` | | `false` | Build the `.apworld` but skip `gh release upload`. |
 
 ### Output
@@ -164,6 +229,8 @@ missing. Otherwise a minimal default is generated.
 
 | name | required | default | notes |
 |---|---|---|---|
+| `release-tag` | | `""` | Existing GitHub Release tag to upload to. Required for pre-publication draft uploads from caller `workflow_dispatch`; release events default from `github.event.release.tag_name`. |
+| `apworld` | | `""` | World folder slug under `worlds/`. Ignored on release events, where the slug is parsed from the release tag. Required for manual/non-release dry-runs. |
 | `source-ref` | | release tag, else `github.sha` | What to check out from your repo. |
 | `dry-run` | | `false` | Shape + build the wheel but skip the release-asset upload. |
 
@@ -210,7 +277,8 @@ changes cut a new major. Pin to a SHA (`@<full-sha>`) for full reproducibility.
   build-apworld.yml              per-world reusable workflow (workflow_call) -- builds .apworld via Launcher.py
   build-wheel.yml                pure-Python reusable workflow (workflow_call) -- flat-layout setuptools repos
 scripts/
-  shape_orphan.py                build the temp orphan tree from caller's worlds/<apworld>/
+  prepare_apworld_release.py       local helper that creates the tag + draft GitHub Release
+  shape_tree.py                  build the temp orphan tree from caller's worlds/<apworld>/
 templates/
   pyproject.toml.j2              fallback per-world pyproject (only used when caller has none)
   README.md.j2                   auto-generated README that ships inside the wheel
