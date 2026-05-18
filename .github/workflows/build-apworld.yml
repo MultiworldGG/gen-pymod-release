@@ -1,12 +1,23 @@
-name: Build per-world .apworld and attach to release
+name: Build per-world .apworld
 
 # Reusable workflow. Produces a <slug>.apworld file by running
 # `python Launcher.py "Build APWorlds" -- "<game>" --skip_open_folder`
 # inside a MultiworldGG checkout, then uploads the result as a release asset.
 #
-# Compose alongside build.yml in your per-world repo's make_pyproject.yml:
+# Compose alongside build.yml in your per-world repo's make_pyproject.yml.
 #
-#   on: { release: { types: [published] }, workflow_dispatch: {} }
+# Caller-trigger guidance:
+#   - release: { types: [published] } is the recommended / "easy" path.
+#     Publishing a draft release fires this, the reusable build runs,
+#     uploads the .whl and .apworld as release assets, and Oliver picks
+#     the release up by watching for the .whl.
+#   - workflow_dispatch is a power-user / dry-run option. Use it only
+#     to target an existing draft release (pass release-tag) to verify
+#     the asset before publication. Oliver does not react to dispatch runs.
+#
+# Example caller `on:` block:
+#
+#   on: { release: { types: [published] }, workflow_dispatch: { inputs: { release-tag: { required: true } } } }
 #   permissions:
 #     contents: write
 #   jobs:
@@ -17,15 +28,16 @@ name: Build per-world .apworld and attach to release
 #       with:
 #         game: "Your Game Name"
 #
-# IMPORTANT — `game` is the World.game *display name* (e.g. "Clique"), not the
-# folder slug (e.g. "clique"). The Launcher's "Build APWorlds" component looks
-# up worlds by display name. The folder slug is inferred from the release tag
-# prefix (same logic as build.yml).
+# IMPORTANT — `game` is the World.game *display name* (e.g. "My Cool Game"), not the
+# folder slug (e.g. "myclgm"). The Launcher's "Build APWorlds" component looks
+# up worlds by display name. Release publishing infers the folder slug from
+# the release tag prefix; the `apworld` input is for manual dry-runs only.
 #
-# NOTE — `mwgg-ref` always resolves against MultiworldGG/MultiworldGG (the
-# canonical monorepo). If you maintain a fork of MultiworldGG/MultiworldGG and
-# have modified Launcher.py itself, you will need to fork this workflow. For
-# all other fork-based world repos, `mwgg-ref: main` (the default) is correct.
+# NOTE — by default this workflow checks out MultiworldGG/MultiworldGG (the
+# canonical monorepo) and overlays the caller's worlds/<apworld>/ onto it. If
+# your repo is itself an Archipelago fork (a full source tree with its own
+# Launcher.py at the root), set `from-fork: true` to build directly from your
+# fork's own Launcher; `mwgg-ref` is ignored in that mode.
 
 on:
   workflow_call:
@@ -33,7 +45,7 @@ on:
       game:
         description: |
           The world's display name — the value of `World.game` in your Python
-          class (e.g. "Clique"). This is passed directly to
+          class (e.g. "My Cool Game"). This is passed directly to
           `Launcher.py "Build APWorlds" -- "<game>"`.
         required: true
         type: string
@@ -41,16 +53,51 @@ on:
         description: |
           Ref of MultiworldGG/MultiworldGG to check out as the Launcher host.
           Defaults to `main`. Pin to a release tag (e.g. `0.6.1`) for
-          reproducible builds.
+          reproducible builds. Ignored when `from-fork: true`.
         required: false
         type: string
         default: "main"
+      from-fork:
+        description: |
+          Set to true when calling from a fork of Archipelago — i.e. the
+          caller's repo is a full Archipelago source tree with its own
+          Launcher.py at the root. The build runs entirely inside the
+          caller's checkout and uses the fork's own Launcher.py; mwgg-ref
+          is ignored.
+        required: false
+        type: boolean
+        default: false
+      apworld:
+        description: |
+          World folder slug under worlds/<apworld>. Release publishing ignores
+          this and parses the slug from the release tag prefix. This input is
+          for workflow_dispatch/manual dry-runs only.
+        required: false
+        type: string
+        default: ""
+      release-tag:
+        description: |
+          Existing GitHub Release tag to upload the .apworld to. Caller
+          workflow_dispatch runs pass this to target a human-owned draft before
+          publication. Release events default to github.event.release.tag_name.
+        required: false
+        type: string
+        default: ""
+      source-ref:
+        description: |
+          Caller-repo ref to check out as the world source. Defaults to
+          release-tag when present, then github.event.release.tag_name, then
+          github.sha. Prefer this over apworld-source-ref for new callers.
+        required: false
+        type: string
+        default: ""
       apworld-source-ref:
         description: |
           Caller-repo ref to check out as the world source. Resolution order:
-          1. This input, if non-empty.
-          2. The release tag, when the triggering event is `release`.
-          3. `github.sha` (the commit that triggered the workflow).
+          1. source-ref, if non-empty.
+          2. This legacy input, if non-empty.
+          3. release-tag or github.event.release.tag_name.
+          4. github.sha.
         required: false
         type: string
         default: ""
@@ -69,18 +116,41 @@ jobs:
     timeout-minutes: 20
 
     steps:
+      - name: Resolve release-tag
+        id: release
+        env:
+          INPUT_RELEASE_TAG: ${{ inputs.release-tag }}
+          EVENT_RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_RELEASE_TAG}" ]; then
+            release_tag="${INPUT_RELEASE_TAG}"
+          elif [ -n "${EVENT_RELEASE_TAG}" ]; then
+            release_tag="${EVENT_RELEASE_TAG}"
+          else
+            release_tag=""
+          fi
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+          if [ -n "${release_tag}" ]; then
+            echo "Resolved release-tag: ${release_tag}"
+          else
+            echo "No release-tag available; this run can build but will not upload."
+          fi
+
       - name: Resolve source-ref
         id: ref
         env:
-          INPUT_REF: ${{ inputs.apworld-source-ref }}
-          EVENT_NAME: ${{ github.event_name }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_REF: ${{ inputs.source-ref }}
+          LEGACY_INPUT_REF: ${{ inputs.apworld-source-ref }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
           CTX_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           if [ -n "${INPUT_REF}" ]; then
             ref="${INPUT_REF}"
-          elif [ "${EVENT_NAME}" = "release" ] && [ -n "${RELEASE_TAG}" ]; then
+          elif [ -n "${LEGACY_INPUT_REF}" ]; then
+            ref="${LEGACY_INPUT_REF}"
+          elif [ -n "${RELEASE_TAG}" ]; then
             ref="${RELEASE_TAG}"
           else
             ref="${CTX_SHA}"
@@ -91,15 +161,15 @@ jobs:
       - name: Resolve apworld slug
         id: apworld
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_APWORLD: ${{ inputs.apworld }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
         run: |
           set -euo pipefail
-          if [ "${EVENT_NAME}" = "release" ] && [ -n "${RELEASE_TAG}" ]; then
-            # Tag must be `<apworld>-<world_version>` (e.g. `clique-1.2.3`).
+          if [ -n "${RELEASE_TAG}" ]; then
+            # Tag must be `<apworld>-<world_version>` (e.g. `myclgm-1.2.3`).
             if [[ "${RELEASE_TAG}" != *-* ]]; then
               echo "::error::release tag '${RELEASE_TAG}' has no '-' separator."
-              echo "Tag releases as '<apworld>-<world_version>' (e.g. 'clique-1.2.3')."
+              echo "Tag releases as '<apworld>-<world_version>' (e.g. 'myclgm-1.2.3')."
               exit 1
             fi
             apworld="${RELEASE_TAG%%-*}"
@@ -109,15 +179,18 @@ jobs:
               exit 1
             fi
             echo "Resolved apworld slug from release tag prefix: ${apworld}"
+          elif [ -n "${INPUT_APWORLD}" ]; then
+            apworld="${INPUT_APWORLD}"
+            echo "Resolved apworld slug from workflow input: ${apworld}"
           else
-            echo "::error::Cannot resolve apworld slug: no release tag is available."
-            echo "This workflow requires a release event (or a non-empty apworld-source-ref pointing at a release tag)."
-            echo "To test without a release, set dry-run: true and push a tag first."
+            echo "::error::Cannot resolve apworld slug: non-release runs must pass the 'apworld' workflow input."
+            echo "For release publishing, tag releases as '<apworld>-<world_version>' (e.g. 'myclgm-1.2.3')."
             exit 1
           fi
           echo "apworld=${apworld}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout MultiworldGG at mwgg-ref
+        if: ${{ !inputs.from-fork }}
         uses: actions/checkout@v6
         with:
           repository: MultiworldGG/MultiworldGG
@@ -126,13 +199,23 @@ jobs:
           fetch-depth: 1
 
       - name: Checkout caller repo at source-ref
+        if: ${{ !inputs.from-fork }}
         uses: actions/checkout@v6
         with:
           ref: ${{ steps.ref.outputs.ref }}
           path: caller
           fetch-depth: 1
 
+      - name: Checkout fork at source-ref (build host)
+        if: ${{ inputs.from-fork }}
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.ref.outputs.ref }}
+          path: mwgg
+          fetch-depth: 1
+
       - name: Overlay caller world onto MultiworldGG checkout
+        if: ${{ !inputs.from-fork }}
         env:
           APWORLD: ${{ steps.apworld.outputs.apworld }}
         run: |
@@ -158,7 +241,7 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install MultiworldGG runtime requirements
+      - name: Install Launcher-host runtime requirements
         run: |
           set -euo pipefail
           cd mwgg
@@ -192,10 +275,10 @@ jobs:
           echo "Artifact: ${apworld_path} ($(du -h "${apworld_path}" | cut -f1))"
 
       - name: Upload .apworld to release
-        if: ${{ !inputs.dry-run && github.event_name == 'release' }}
+        if: ${{ !inputs.dry-run && steps.release.outputs.release_tag != '' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
         run: |
           set -euo pipefail
           apworld_path="${{ steps.artifact.outputs.apworld_path }}"
@@ -210,9 +293,9 @@ jobs:
           echo "Uploaded: https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/${{ steps.artifact.outputs.apworld_basename }}"
 
       - name: Non-release / dry-run summary
-        if: ${{ inputs.dry-run || github.event_name != 'release' }}
+        if: ${{ inputs.dry-run || steps.release.outputs.release_tag == '' }}
         run: |
-          echo "::notice::Skipping release-asset upload (dry-run=${{ inputs.dry-run }}, event=${{ github.event_name }})."
+          echo "::notice::Skipping release-asset upload (dry-run=${{ inputs.dry-run }}, release-tag=${{ steps.release.outputs.release_tag }})."
           echo "Game: ${{ inputs.game }}"
           echo "Apworld slug: ${{ steps.apworld.outputs.apworld }}"
           echo "Source ref: ${{ steps.ref.outputs.ref }}"

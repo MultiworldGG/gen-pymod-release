@@ -1,27 +1,50 @@
-name: Build per-world wheel as to add to release asset
+name: Build MultiWorld python .whl
 
 # Reusable workflow. Invoked by per-world repos like:
 #
-#   on: { release: { types: [published] }, workflow_dispatch: {} }
+#   on: { release: { types: [published] }, workflow_dispatch: { inputs: { release-tag: { required: true } } } }
 #   jobs:
 #     publish:
 #       uses: MultiworldGG/gen-pymod-release/.github/workflows/build.yml@v3
 #
-# Builds the world from worlds/<apworld>/ at the release tag's checked-out source
-# and uploads the resulting `.whl` as an asset on the release.
+# Caller-trigger guidance:
+#   - release: { types: [published] } is the recommended / "easy" path.
+#     Publishing a draft release fires this, the reusable build runs,
+#     uploads the .whl as a release asset, and Oliver picks the release
+#     up by watching for the .whl.
+#   - workflow_dispatch is a power-user / dry-run option. Use it only
+#     to target an existing draft release (pass release-tag) to verify
+#     the asset before publication. Oliver does not react to dispatch runs.
 #
-# The matching Index PR is opened separately by the Oliver Multiworld Squirrel GitHub App when it sees the
-# workflow_run.completed event from this workflow.
+# Builds the world from worlds/<apworld>/ at source-ref and uploads the
+# resulting `.whl` as an asset on release-tag when one is provided.
 #
-# TODO: Change this. Give apworld owner a 'gh' command to start a release workflow from their 
+# The matching Index PR is opened separately by the Oliver Multiworld Squirrel
+# GitHub App after the release is published.
 
 on:
   workflow_call:
     inputs:
+      apworld:
+        description: |
+          APWorld folder name under worlds/<apworld>. Release publishing ignores
+          this and parses the apworld from the release tag prefix. This input is
+          for workflow_dispatch/manual runs only.
+        required: false
+        type: string
+        default: ""
+      release-tag:
+        description: |
+          Existing GitHub Release tag to upload the wheel to. Caller
+          workflow_dispatch runs pass this to target a human-owned draft before
+          publication. Release events default to github.event.release.tag_name.
+        required: false
+        type: string
+        default: ""
       source-ref:
         description: |
-          Git ref of the caller repo to build from. Defaults to the release tag
-          (when triggered by `release: published`) or the current SHA otherwise.
+          Git ref of the caller repo to build from. Defaults to release-tag
+          when present, then github.event.release.tag_name, then the current SHA.
         required: false
         type: string
         default: ""
@@ -40,18 +63,38 @@ jobs:
     timeout-minutes: 20
 
     steps:
+      - name: Resolve release-tag
+        id: release
+        env:
+          INPUT_RELEASE_TAG: ${{ inputs.release-tag }}
+          EVENT_RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_RELEASE_TAG}" ]; then
+            release_tag="${INPUT_RELEASE_TAG}"
+          elif [ -n "${EVENT_RELEASE_TAG}" ]; then
+            release_tag="${EVENT_RELEASE_TAG}"
+          else
+            release_tag=""
+          fi
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+          if [ -n "${release_tag}" ]; then
+            echo "Resolved release-tag: ${release_tag}"
+          else
+            echo "No release-tag available; this run can build but will not upload."
+          fi
+
       - name: Resolve source-ref
         id: ref
         env:
           INPUT_REF: ${{ inputs.source-ref }}
-          EVENT_NAME: ${{ github.event_name }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
           CTX_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           if [ -n "${INPUT_REF}" ]; then
             ref="${INPUT_REF}"
-          elif [ "${EVENT_NAME}" = "release" ] && [ -n "${RELEASE_TAG}" ]; then
+          elif [ -n "${RELEASE_TAG}" ]; then
             ref="${RELEASE_TAG}"
           else
             ref="${CTX_SHA}"
@@ -62,27 +105,33 @@ jobs:
       - name: Resolve apworld
         id: apworld
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_APWORLD: ${{ inputs.apworld }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
         run: |
           set -euo pipefail
-          if [ "${EVENT_NAME}" != "release" ] || [ -z "${RELEASE_TAG}" ]; then
-            echo "::error::Cannot resolve apworld: this workflow only runs on release events. The slug is parsed from the release tag prefix '<apworld>-<world_version>'."
+          tag_version=""
+          if [ -n "${RELEASE_TAG}" ]; then
+            # Tag must be `<apworld>-<world_version>` (e.g. `generic-1.2.3`).
+            if [[ "${RELEASE_TAG}" != *-* ]]; then
+              echo "::error::release tag '${RELEASE_TAG}' has no '-' separator."
+              echo "Tag releases as '<apworld>-<world_version>' (e.g. 'generic-1.2.3')."
+              exit 1
+            fi
+            apworld="${RELEASE_TAG%%-*}"
+            tag_version="${RELEASE_TAG#*-}"
+            if [ -z "${apworld}" ] || [ -z "${tag_version}" ]; then
+              echo "::error::Release tag '${RELEASE_TAG}' did not parse to a non-empty apworld and world_version."
+              exit 1
+            fi
+            echo "Resolved apworld from release tag prefix: ${apworld} (tag-declared version=${tag_version})"
+          elif [ -n "${INPUT_APWORLD}" ]; then
+            apworld="${INPUT_APWORLD}"
+            echo "Resolved apworld from workflow input: ${apworld}"
+          else
+            echo "::error::Cannot resolve apworld: non-release runs must pass the 'apworld' workflow input."
+            echo "For release publishing, tag releases as '<apworld>-<world_version>' (e.g. 'generic-1.2.3')."
             exit 1
           fi
-          # Tag must be `<apworld>-<world_version>` (e.g. `generic-1.2.3`).
-          if [[ "${RELEASE_TAG}" != *-* ]]; then
-            echo "::error::release tag '${RELEASE_TAG}' has no '-' separator."
-            echo "Tag releases as '<apworld>-<world_version>' (e.g. 'generic-1.2.3')."
-            exit 1
-          fi
-          apworld="${RELEASE_TAG%%-*}"
-          tag_version="${RELEASE_TAG#*-}"
-          if [ -z "${apworld}" ] || [ -z "${tag_version}" ]; then
-            echo "::error::Release tag '${RELEASE_TAG}' did not parse to a non-empty apworld and world_version."
-            exit 1
-          fi
-          echo "Resolved apworld from release tag prefix: ${apworld} (tag-declared version=${tag_version})"
           echo "apworld=${apworld}" >> "$GITHUB_OUTPUT"
           echo "tag_version=${tag_version}" >> "$GITHUB_OUTPUT"
 
@@ -92,16 +141,12 @@ jobs:
           ref: ${{ steps.ref.outputs.ref }}
           fetch-depth: 1
 
-      - name: Checkout build-and-publish-action (for scripts/templates)
-        # In a reusable workflow, github.workflow_sha refers to the CALLER's
-        # SHA, not this workflow's — we can't use it to pin the auxiliary
-        # checkout. Hardcoding the major-version tag is the simplest correct
-        # behavior; v3.x patch fixes fast-forward this tag.
+      - name: Checkout gen-pymod-release (for scripts/templates)
         uses: actions/checkout@v6
         with:
-          repository: MultiworldGG/build-and-publish-action
+          repository: MultiworldGG/gen-pymod-release
           ref: v3
-          path: .build-and-publish-action
+          path: .gen-pymod-release
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -113,25 +158,19 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install tomli_w build
 
-      # NOTE: shape_orphan.py is the single source of truth for "does
-      # worlds/<apworld>/archipelago.json exist?" — it raises a friendly
-      # ::error:: with the same diagnostic if the directory or the JSON file
-      # is missing. We deliberately do NOT pre-check here; that was duplicate
-      # work and a place where the two checks could drift apart.
-
-      - name: Shape tree
+      - name: Shape Python Module Directory Tree
         id: shape
         run: |
           set -euo pipefail
-          python .build-and-publish-action/scripts/shape_orphan.py \
+          python .gen-pymod-release/scripts/shape_tree.py \
             --source-root . \
             --apworld "${{ steps.apworld.outputs.apworld }}" \
-            --templates-dir .build-and-publish-action/templates \
+            --templates-dir .gen-pymod-release/templates \
             --output-dir .orphan-tree \
             --caller-repo "${{ github.repository }}" \
             --source-ref "${{ steps.ref.outputs.ref }}"
           # Read world_version from .shape_info.json — the single source of
-          # truth shape_orphan.py wrote. Avoids re-parsing archipelago.json.
+          # truth shape_tree.py wrote. Avoids re-parsing archipelago.json.
           world_version=$(python -c "
           import json
           print(json.load(open('.orphan-tree/.shape_info.json', encoding='utf-8'))['world_version'])
@@ -139,11 +178,12 @@ jobs:
           echo "world_version=${world_version}" >> "$GITHUB_OUTPUT"
           echo "World version: ${world_version}"
 
-      - name: Verify tag-declared version matches archipelago.json
+      - name: Verify version number matches APWorld's archipelago.json
+        if: ${{ steps.release.outputs.release_tag != '' }}
         env:
           TAG_VERSION: ${{ steps.apworld.outputs.tag_version }}
           ARCH_VERSION: ${{ steps.shape.outputs.world_version }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
           APWORLD: ${{ steps.apworld.outputs.apworld }}
         run: |
           set -euo pipefail
@@ -154,18 +194,18 @@ jobs:
           fi
           echo "Version skew check passed: ${TAG_VERSION} == ${ARCH_VERSION}"
 
-      - name: Build wheel
+      - name: Build Python .whl of APWorld
         run: |
           set -euo pipefail
           (cd .orphan-tree && python -m build --wheel)
           ls -la .orphan-tree/dist/
 
-      - name: Upload wheel to release
+      - name: Upload Python .whl of APWorld to release
         id: upload
-        if: ${{ !inputs.dry-run && github.event_name == 'release' }}
+        if: ${{ !inputs.dry-run && steps.release.outputs.release_tag != '' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -177,11 +217,13 @@ jobs:
           wheel="${wheels[0]}"
           basename="$(basename "$wheel")"
           echo "Uploading ${basename} to release ${RELEASE_TAG}"
+
           # No --clobber: the asset bytes are part of the trust boundary that
           # the consumer-side `module_location#sha256=<hex>` pin protects. If a
           # re-upload is needed (transient build failure, etc.), delete the
           # existing asset (`gh release delete-asset`) or recreate the release
           # first — making every overwrite a deliberate human action.
+
           gh release upload "${RELEASE_TAG}" "$wheel" \
             --repo "${{ github.repository }}"
           url="https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/${basename}"
@@ -189,9 +231,9 @@ jobs:
           echo "Asset URL: ${url}"
 
       - name: Non-release / dry-run summary
-        if: ${{ inputs.dry-run || github.event_name != 'release' }}
+        if: ${{ inputs.dry-run || steps.release.outputs.release_tag == '' }}
         run: |
-          echo "::notice::Skipping release-asset upload (dry-run=${{ inputs.dry-run }}, event=${{ github.event_name }})."
+          echo "::notice::Skipping release-asset upload (dry-run=${{ inputs.dry-run }}, release-tag=${{ steps.release.outputs.release_tag }})."
           echo "World: ${{ steps.apworld.outputs.apworld }}@${{ steps.shape.outputs.world_version }}"
           echo "Source ref: ${{ steps.ref.outputs.ref }}"
           ls -la .orphan-tree/dist/ || true
