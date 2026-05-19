@@ -94,8 +94,8 @@ jobs:
           # games.json stub so the maintainer sees the shape they need to fill in.
           cat > "${bundle}/tools/build/games.json" <<'JSON'
           {
-            "_comment": "Map your worlds/<slug>/ directory names to the World.game display name (the value of World.game on your Python class). Required for release-event builds of the .apworld.",
-            "example-slug": "Example Game Display Name"
+            "_comment": "Map your worlds/<apworld>/ directory names to the World.game display name (the value of World.game on your Python class). Add one entry per apworld in the fork. The workflow looks up the matching entry per release tag; it does not iterate. Required for release-event builds of the .apworld.",
+            "example-apworld": "Example Game Display Name"
           }
           JSON
           zip -r "${bundle}.zip" "${bundle}"

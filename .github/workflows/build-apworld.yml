@@ -1,6 +1,6 @@
 name: Build per-world .apworld
 
-# Reusable workflow. Produces a <slug>.apworld file by running
+# Reusable workflow. Produces a <apworld>.apworld file by running
 # `python Launcher.py "Build APWorlds" -- "<game>" --skip_open_folder`
 # inside a MultiworldGG checkout, then uploads the result as a release asset.
 #
@@ -29,8 +29,8 @@ name: Build per-world .apworld
 #         game: "Your Game Name"
 #
 # IMPORTANT — `game` is the World.game *display name* (e.g. "My Cool Game"), not the
-# folder slug (e.g. "myclgm"). The Launcher's "Build APWorlds" component looks
-# up worlds by display name. Release publishing infers the folder slug from
+# folder name (e.g. "myclgm"). The Launcher's "Build APWorlds" component looks
+# up worlds by display name. Release publishing infers the apworld from
 # the release tag prefix; the `apworld` input is for manual dry-runs only.
 #
 # NOTE — by default this workflow checks out MultiworldGG/MultiworldGG (the
@@ -69,9 +69,9 @@ on:
         default: false
       apworld:
         description: |
-          World folder slug under worlds/<apworld>. Release publishing ignores
-          this and parses the slug from the release tag prefix. This input is
-          for workflow_dispatch/manual dry-runs only.
+          World folder name under worlds/<apworld>/. Release publishing ignores
+          this and parses the apworld from the release tag prefix. This input
+          is for workflow_dispatch/manual dry-runs only.
         required: false
         type: string
         default: ""
@@ -158,7 +158,7 @@ jobs:
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
           echo "Resolved source-ref: ${ref}"
 
-      - name: Resolve apworld slug
+      - name: Resolve apworld
         id: apworld
         env:
           INPUT_APWORLD: ${{ inputs.apworld }}
@@ -178,12 +178,12 @@ jobs:
               echo "::error::Release tag '${RELEASE_TAG}' did not parse to a non-empty apworld and world_version."
               exit 1
             fi
-            echo "Resolved apworld slug from release tag prefix: ${apworld}"
+            echo "Resolved apworld from release tag prefix: ${apworld}"
           elif [ -n "${INPUT_APWORLD}" ]; then
             apworld="${INPUT_APWORLD}"
-            echo "Resolved apworld slug from workflow input: ${apworld}"
+            echo "Resolved apworld from workflow input: ${apworld}"
           else
-            echo "::error::Cannot resolve apworld slug: non-release runs must pass the 'apworld' workflow input."
+            echo "::error::Cannot resolve apworld: non-release runs must pass the 'apworld' workflow input."
             echo "For release publishing, tag releases as '<apworld>-<world_version>' (e.g. 'myclgm-1.2.3')."
             exit 1
           fi
@@ -297,7 +297,7 @@ jobs:
         run: |
           echo "::notice::Skipping release-asset upload (dry-run=${{ inputs.dry-run }}, release-tag=${{ steps.release.outputs.release_tag }})."
           echo "Game: ${{ inputs.game }}"
-          echo "Apworld slug: ${{ steps.apworld.outputs.apworld }}"
+          echo "Apworld: ${{ steps.apworld.outputs.apworld }}"
           echo "Source ref: ${{ steps.ref.outputs.ref }}"
           echo "Built artifact: ${{ steps.artifact.outputs.apworld_path }}"
           echo ""
