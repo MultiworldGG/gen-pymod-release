@@ -115,7 +115,7 @@ jobs:
             gh release create "${TAG}" \
               --repo "${GITHUB_REPOSITORY}" \
               --title "${TAG}" \
-              --notes "Self-contained apworld wheel + apworld build workflow bundle. Unzip the contents at the root of your Archipelago fork."
+              --notes "For users who don't want to use the reusable workflow in this repository, but would rather copy it into their own repository. Setup instructions are here: https://multiworldgg.github.io/MultiworldGG-Index/advanced/from-archipelago-fork/#vendored-build-tooling-self-contained-setup"
           fi
 
       - name: Upload bundle .zip
@@ -125,6 +125,5 @@ jobs:
           ZIP: ${{ steps.stage.outputs.zip }}
         run: |
           set -euo pipefail
-          # No --clobber: re-issuing a bundle for the same tag must be deliberate.
-          gh release upload "${TAG}" "${ZIP}" --repo "${GITHUB_REPOSITORY}"
+          gh release upload "${TAG}" "${ZIP}" --repo "${GITHUB_REPOSITORY} --clobber"
           echo "Asset: https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${ZIP}"
