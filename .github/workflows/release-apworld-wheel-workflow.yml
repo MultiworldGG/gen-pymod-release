@@ -102,27 +102,6 @@ jobs:
           echo "zip=${bundle}.zip" >> "$GITHUB_OUTPUT"
           ls -la "${bundle}.zip"
 
-      - name: Create tag if missing
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.tag.outputs.tag }}
-        run: |
-          set -euo pipefail
-          sha="${GITHUB_SHA}"
-          if existing_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" --jq '.object.sha' 2>/dev/null); then
-            if [ "${existing_sha}" = "${sha}" ]; then
-              echo "Tag ${TAG} already at ${sha} -- reusing."
-            else
-              echo "::error::Tag ${TAG} exists at ${existing_sha} but workflow ran at ${sha}. Refusing to move the tag."
-              exit 1
-            fi
-          else
-            echo "Creating tag ${TAG} at ${sha}"
-            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
-              -f "ref=refs/tags/${TAG}" \
-              -f "sha=${sha}"
-          fi
-
       - name: Create release if missing
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
