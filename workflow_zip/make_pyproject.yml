@@ -1,7 +1,7 @@
 name: Create and Release Python Package
 
-# Builds worlds/<slug>/ as a Python wheel and uploads it as an asset on a
-# release tagged <slug>-<version> (e.g. "myclgm-1.2.3"). The shape/build
+# Builds worlds/<apworld>/ as a Python wheel and uploads it as an asset on a
+# release tagged <apworld>-<version> (e.g. "myclgm-1.2.3"). The shape/build
 # scripts live under tools/build/ in this same repository.
 
 on:
@@ -9,8 +9,8 @@ on:
     types: [published]
   workflow_dispatch:
     inputs:
-      slug:
-        description: "World folder name under worlds/<slug>/. Required for manual runs."
+      apworld:
+        description: "World folder name under worlds/<apworld>/. Required for manual runs."
         required: false
         type: string
         default: ""
@@ -77,10 +77,10 @@ jobs:
           fi
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
 
-      - name: Resolve slug
-        id: slug
+      - name: Resolve apworld
+        id: apworld
         env:
-          INPUT_SLUG: ${{ inputs.slug }}
+          INPUT_APWORLD: ${{ inputs.apworld }}
           RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
         run: |
           set -euo pipefail
@@ -88,22 +88,22 @@ jobs:
           if [ -n "${RELEASE_TAG}" ]; then
             if [[ "${RELEASE_TAG}" != *-* ]]; then
               echo "::error::release tag '${RELEASE_TAG}' has no '-' separator."
-              echo "Tag releases as '<slug>-<version>' (e.g. 'generic-1.2.3')."
+              echo "Tag releases as '<apworld>-<version>' (e.g. 'generic-1.2.3')."
               exit 1
             fi
-            slug="${RELEASE_TAG%%-*}"
+            apworld="${RELEASE_TAG%%-*}"
             tag_version="${RELEASE_TAG#*-}"
-            if [ -z "${slug}" ] || [ -z "${tag_version}" ]; then
-              echo "::error::Release tag '${RELEASE_TAG}' did not parse to a non-empty slug and version."
+            if [ -z "${apworld}" ] || [ -z "${tag_version}" ]; then
+              echo "::error::Release tag '${RELEASE_TAG}' did not parse to a non-empty apworld and version."
               exit 1
             fi
-          elif [ -n "${INPUT_SLUG}" ]; then
-            slug="${INPUT_SLUG}"
+          elif [ -n "${INPUT_APWORLD}" ]; then
+            apworld="${INPUT_APWORLD}"
           else
-            echo "::error::Cannot resolve slug: non-release runs must pass the 'slug' workflow input."
+            echo "::error::Cannot resolve apworld: non-release runs must pass the 'apworld' workflow input."
             exit 1
           fi
-          echo "slug=${slug}" >> "$GITHUB_OUTPUT"
+          echo "apworld=${apworld}" >> "$GITHUB_OUTPUT"
           echo "tag_version=${tag_version}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout repo at source-ref
@@ -128,7 +128,7 @@ jobs:
           set -euo pipefail
           python tools/build/scripts/shape_tree.py \
             --source-root . \
-            --apworld "${{ steps.slug.outputs.slug }}" \
+            --apworld "${{ steps.apworld.outputs.apworld }}" \
             --templates-dir tools/build/templates \
             --output-dir .orphan-tree \
             --caller-repo "${{ github.repository }}" \
@@ -142,14 +142,14 @@ jobs:
       - name: Verify tag version matches archipelago.json
         if: ${{ steps.release.outputs.release_tag != '' }}
         env:
-          TAG_VERSION: ${{ steps.slug.outputs.tag_version }}
+          TAG_VERSION: ${{ steps.apworld.outputs.tag_version }}
           ARCH_VERSION: ${{ steps.shape.outputs.world_version }}
           RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
-          SLUG: ${{ steps.slug.outputs.slug }}
+          APWORLD: ${{ steps.apworld.outputs.apworld }}
         run: |
           set -euo pipefail
           if [ "${TAG_VERSION}" != "${ARCH_VERSION}" ]; then
-            echo "::error::Release tag '${RELEASE_TAG}' parses to '${TAG_VERSION}', but worlds/${SLUG}/archipelago.json says world_version='${ARCH_VERSION}'."
+            echo "::error::Release tag '${RELEASE_TAG}' parses to '${TAG_VERSION}', but worlds/${APWORLD}/archipelago.json says world_version='${ARCH_VERSION}'."
             exit 1
           fi
 
@@ -185,13 +185,13 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - name: Resolve release-tag, source-ref, slug
+      - name: Resolve release-tag, source-ref, apworld
         id: resolve
         env:
           INPUT_RELEASE_TAG: ${{ inputs.release-tag }}
           EVENT_RELEASE_TAG: ${{ github.event.release.tag_name }}
           INPUT_REF: ${{ inputs.source-ref }}
-          INPUT_SLUG: ${{ inputs.slug }}
+          INPUT_APWORLD: ${{ inputs.apworld }}
           INPUT_GAME: ${{ inputs.game }}
           CTX_SHA: ${{ github.sha }}
         run: |
@@ -215,16 +215,16 @@ jobs:
               echo "::error::release tag '${release_tag}' has no '-' separator."
               exit 1
             fi
-            slug="${release_tag%%-*}"
-          elif [ -n "${INPUT_SLUG}" ]; then
-            slug="${INPUT_SLUG}"
+            apworld="${release_tag%%-*}"
+          elif [ -n "${INPUT_APWORLD}" ]; then
+            apworld="${INPUT_APWORLD}"
           else
-            echo "::error::Cannot resolve slug for apworld job."
+            echo "::error::Cannot resolve apworld for apworld job."
             exit 1
           fi
           echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
-          echo "slug=${slug}" >> "$GITHUB_OUTPUT"
+          echo "apworld=${apworld}" >> "$GITHUB_OUTPUT"
           echo "input_game=${INPUT_GAME}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout fork at source-ref
@@ -237,7 +237,7 @@ jobs:
         id: game
         env:
           INPUT_GAME: ${{ steps.resolve.outputs.input_game }}
-          SLUG: ${{ steps.resolve.outputs.slug }}
+          APWORLD: ${{ steps.resolve.outputs.apworld }}
         run: |
           set -euo pipefail
           if [ -n "${INPUT_GAME}" ]; then
@@ -245,11 +245,11 @@ jobs:
           else
             game=$(python -c "
           import json, os, sys
-          slug = os.environ['SLUG']
+          apworld = os.environ['APWORLD']
           m = json.load(open('tools/build/games.json', encoding='utf-8'))
-          v = m.get(slug)
+          v = m.get(apworld)
           if not v:
-              sys.exit(f\"slug {slug!r} not found in tools/build/games.json\")
+              sys.exit(f\"apworld {apworld!r} not found in tools/build/games.json\")
           print(v)
           ")
           fi
@@ -277,10 +277,10 @@ jobs:
       - name: Verify .apworld was produced
         id: artifact
         env:
-          SLUG: ${{ steps.resolve.outputs.slug }}
+          APWORLD: ${{ steps.resolve.outputs.apworld }}
         run: |
           set -euo pipefail
-          apworld_path="build/apworlds/${SLUG}.apworld"
+          apworld_path="build/apworlds/${APWORLD}.apworld"
           if [ ! -f "${apworld_path}" ]; then
             echo "::error::Expected '${apworld_path}' was not produced."
             echo "Check that the 'game' value matches the World.game attribute exactly."
@@ -288,7 +288,7 @@ jobs:
             exit 1
           fi
           echo "apworld_path=${apworld_path}" >> "$GITHUB_OUTPUT"
-          echo "apworld_basename=${SLUG}.apworld" >> "$GITHUB_OUTPUT"
+          echo "apworld_basename=${APWORLD}.apworld" >> "$GITHUB_OUTPUT"
 
       - name: Upload .apworld to release
         if: ${{ !inputs.dry-run && steps.resolve.outputs.release_tag != '' }}

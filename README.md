@@ -39,7 +39,7 @@ on:
         required: false
         type: string
       apworld:
-        description: "World folder slug, e.g. myclgm"
+        description: "World folder name under worlds/<apworld>/, e.g. myclgm"
         required: false
         type: string
 
@@ -164,7 +164,7 @@ on:
         required: false
         type: string
       apworld:
-        description: "World folder slug, e.g. myclgm"
+        description: "World folder name under worlds/<apworld>/, e.g. myclgm"
         required: false
         type: string
 
@@ -200,19 +200,20 @@ directly into `custom_worlds/`. Drop either job if you do not need it.
 | `from-fork` | | `false` | Set to `true` when calling from an Archipelago fork (a full source tree with its own `Launcher.py`). Skips the canonical MWGG checkout and builds from the caller's own tree; `mwgg-ref` is ignored. |
 | `release-tag` | | `""` | Existing GitHub Release tag to upload to. Required for pre-publication draft uploads from caller `workflow_dispatch`; release events default from `github.event.release.tag_name`. |
 | `source-ref` | | release tag, else `github.sha` | Caller-repo ref to check out for the world source. Prefer this input for new callers. |
-| `apworld` | | `""` | World folder slug under `worlds/`. Ignored on release events, where the slug is parsed from the release tag. Required for manual/non-release dry-runs. |
+| `apworld` | | `""` | World folder name under `worlds/<apworld>/`. Ignored on release events, where the apworld is parsed from the release tag prefix. Required for manual/non-release dry-runs. |
 | `apworld-source-ref` | | release tag, else `github.sha` | Legacy alias for `source-ref`; kept for existing callers. |
 | `dry-run` | | `false` | Build the `.apworld` but skip `gh release upload`. |
 
 ### Output
 
-A single `<slug>.apworld` file attached to the GitHub release as an asset. The
-slug is inferred from the release tag prefix (`<slug>-<version>`). The upload
-uses `--clobber` — unlike the wheel, the `.apworld` is not pinned by a SHA256
-fragment on the Index side, so overwriting on workflow re-runs is safe.
+A single `<apworld>.apworld` file attached to the GitHub release as an asset.
+The apworld is inferred from the release tag prefix (`<apworld>-<version>`).
+The upload uses `--clobber` — unlike the wheel, the `.apworld` is not pinned
+by a SHA256 fragment on the Index side, so overwriting on workflow re-runs is
+safe.
 
 ```
-https://github.com/<owner>/<repo>/releases/download/<release_tag>/<slug>.apworld
+https://github.com/<owner>/<repo>/releases/download/<release_tag>/<apworld>.apworld
 ```
 
 ## Repo layout requirement
@@ -230,7 +231,7 @@ missing. Otherwise a minimal default is generated.
 | name | required | default | notes |
 |---|---|---|---|
 | `release-tag` | | `""` | Existing GitHub Release tag to upload to. Required for pre-publication draft uploads from caller `workflow_dispatch`; release events default from `github.event.release.tag_name`. |
-| `apworld` | | `""` | World folder slug under `worlds/`. Ignored on release events, where the slug is parsed from the release tag. Required for manual/non-release dry-runs. |
+| `apworld` | | `""` | World folder name under `worlds/<apworld>/`. Ignored on release events, where the apworld is parsed from the release tag prefix. Required for manual/non-release dry-runs. |
 | `source-ref` | | release tag, else `github.sha` | What to check out from your repo. |
 | `dry-run` | | `false` | Shape + build the wheel but skip the release-asset upload. |
 
