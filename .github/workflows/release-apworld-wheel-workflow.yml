@@ -125,5 +125,5 @@ jobs:
           ZIP: ${{ steps.stage.outputs.zip }}
         run: |
           set -euo pipefail
-          gh release upload "${TAG}" "${ZIP}" --repo "${GITHUB_REPOSITORY} --clobber"
+          gh release upload "${TAG}" "${ZIP}" --clobber --repo "${GITHUB_REPOSITORY}"
           echo "Asset: https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${ZIP}"
