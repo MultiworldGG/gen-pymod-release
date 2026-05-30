@@ -134,10 +134,10 @@ the `apworld` input and set `dry-run: true`. If you pass `release-tag`, uploads
 target that release; without `release-tag`, the workflow builds only and skips
 release upload.
 
-The Oliver-Multiworld-Squirrel GitHub App must also be installed on your repo
+Oliver-the-Multiworld-Squirrel GitHub App must also be installed on your repo
 (read-only) so it can see the published release and open the Index PR on your
 behalf. Install it from
-<https://github.com/apps/oliver-multiworld-squirrel>.
+<https://github.com/apps/oliver-the-multiworld-squirrel>.
 
 ## Building a `.apworld` alongside the wheel
 
