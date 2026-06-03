@@ -111,6 +111,46 @@ def _file_module_path(py_file: Path, world_dir: Path, apworld: str) -> str:
 
 
 _LAUNCH_DISPATCH_NAMES = frozenset({"launch", "launch_subprocess", "launch_component"})
+# Raw multiprocessing dispatch: `Process(target=fn)` / `multiprocessing.Process(target=fn)`.
+# The target callable is the `target=` keyword rather than the first positional arg.
+_PROCESS_DISPATCH_NAMES = frozenset({"Process"})
+
+
+def _extract_inner_target(
+    expr: ast.expr, body_imports: dict[str, tuple[str, str]]
+) -> Optional[tuple[str, str]]:
+    """Resolve a dispatch argument expression to the inner client `(module, attr)`,
+    using the names an inner `from .X import Y` bound in the wrapper body.
+
+    Handles the shapes worlds use to hand a client callable to the launcher:
+      - `Y`                  bare name (e.g. `launch(Y, ...)`, `Process(target=Y)`)
+      - `mod.Y`              attribute on a `from . import mod` module import
+      - `Y(*args)`           the callee itself is the client (ufo50)
+      - `partial(Y, *args)`  partial-bound client (xenobladex)
+
+    The attribute branch assumes the base name is a *module* import
+    (`from . import client; client.launch`); the `from .X import Y; Y.attr`
+    shape doesn't occur in practice and would mis-resolve here.
+    """
+    if isinstance(expr, ast.Name):
+        return body_imports.get(expr.id)
+    if isinstance(expr, ast.Attribute) and isinstance(expr.value, ast.Name):
+        bound = body_imports.get(expr.value.id)
+        if bound is not None:
+            module, name = bound
+            return (f"{module}.{name}", expr.attr)
+        return None
+    if isinstance(expr, ast.Call):
+        # `launch(*args)` — the callee itself is the inner client.
+        from_callee = _extract_inner_target(expr.func, body_imports)
+        if from_callee is not None:
+            return from_callee
+        # `partial(launch, *args)` — the first resolvable positional is the client.
+        for arg in expr.args:
+            resolved = _extract_inner_target(arg, body_imports)
+            if resolved is not None:
+                return resolved
+    return None
 
 
 def _trace_wrapper_to_inner_target(
@@ -132,11 +172,15 @@ def _trace_wrapper_to_inner_target(
     world's option/region/item module-level code, and re-fires the
     `components.append(...)` side effect we're trying to retire. Instead,
     walk the wrapper's body for the inner `from .X import Y` and the inner
-    `launch(...)` / `launch_subprocess(...)` / `launch_component(...)` call
-    whose first positional argument is `Y`, and emit `<resolved>:Y` so the
-    entry point lands on the actual client module.
+    dispatch call, then emit `<resolved>:Y` so the entry point lands on the
+    actual client module. Recognized dispatch calls are
+    `launch(...)` / `launch_subprocess(...)` / `launch_component(...)` (target
+    is the first positional arg) and `Process(target=...)` /
+    `multiprocessing.Process(target=...)` (target is the `target` keyword).
+    The target expression is unwrapped by `_extract_inner_target`, which also
+    handles `mod.Y`, `Y(*args)`, and `partial(Y, *args)` shapes.
 
-    Returns None when the wrapper is not a simple `import + launch(Y)`
+    Returns None when the wrapper is not a recognized `import + dispatch(Y)`
     shape — in that case the caller should skip emission and warn.
     """
     body_imports: dict[str, tuple[str, str]] = {}
@@ -165,15 +209,21 @@ def _trace_wrapper_to_inner_target(
             call_name = stmt.func.id
         elif isinstance(stmt.func, ast.Attribute):
             call_name = stmt.func.attr
-        if call_name not in _LAUNCH_DISPATCH_NAMES:
+
+        if call_name in _LAUNCH_DISPATCH_NAMES:
+            target_expr: Optional[ast.expr] = stmt.args[0] if stmt.args else None
+        elif call_name in _PROCESS_DISPATCH_NAMES:
+            target_expr = next(
+                (kw.value for kw in stmt.keywords if kw.arg == "target"), None
+            )
+        else:
             continue
-        if not stmt.args:
+        if target_expr is None:
             continue
-        first = stmt.args[0]
-        if not isinstance(first, ast.Name):
-            continue
-        if first.id in body_imports:
-            return body_imports[first.id]
+
+        resolved = _extract_inner_target(target_expr, body_imports)
+        if resolved is not None:
+            return resolved
 
     return None
 
@@ -259,6 +309,20 @@ def parse_client_entry_points(world_dir: Path, apworld: str) -> list[tuple[str, 
         file_module = _file_module_path(py_file, world_dir, apworld)
         is_init = py_file.name == "__init__.py"
 
+        # Local names that refer to LauncherComponents.Type. It's frequently
+        # aliased on import (e.g. `from worlds.LauncherComponents import
+        # Type as ComponentType`), so `component_type=ComponentType.CLIENT`
+        # is the same as `Type.CLIENT`. Seed with the canonical name so plain
+        # `Type.CLIENT` always matches; collect aliases only from
+        # LauncherComponents imports to avoid e.g. `typing.Type` false matches.
+        type_aliases: set[str] = {"Type"}
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.ImportFrom) and node.module
+                    and node.module.split(".")[-1] == "LauncherComponents"):
+                for alias in node.names:
+                    if alias.name == "Type":
+                        type_aliases.add(alias.asname or "Type")
+
         # local_name → (target_module, original_attr)
         local_to_target: dict[str, tuple[str, str]] = {}
         for node in tree.body:
@@ -295,7 +359,8 @@ def parse_client_entry_points(world_dir: Path, apworld: str) -> list[tuple[str, 
                     ctype_explicit = True
                     v = kw.value
                     if (isinstance(v, ast.Attribute) and v.attr == "CLIENT"
-                            and isinstance(v.value, ast.Name) and v.value.id == "Type"):
+                            and isinstance(v.value, ast.Name)
+                            and v.value.id in type_aliases):
                         ctype_is_client = True
                 elif kw.arg == "func":
                     if isinstance(kw.value, ast.Name):
@@ -327,8 +392,11 @@ def parse_client_entry_points(world_dir: Path, apworld: str) -> list[tuple[str, 
             # `components.append(...)`. Trace the wrapper body to the real
             # client module instead.
             if target_module == pkg_root:
+                # Walk the whole tree (not just tree.body) so wrappers nested
+                # inside `if`/`try` blocks are found — e.g. dk64's
+                # `if baseclasses_loaded:` and stardew_valley's tracker guards.
                 wrapper_def = next(
-                    (n for n in tree.body
+                    (n for n in ast.walk(tree)
                      if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
                      and n.name == func_name),
                     None,
