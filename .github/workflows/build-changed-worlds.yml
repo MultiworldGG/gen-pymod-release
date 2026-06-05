@@ -31,14 +31,18 @@ on:
         type: string
         required: false
         default: ""
+      upload-client-id:
+        description: "GitHub App Client ID (Iv23...) of the app that uploads wheels to release-repo"
+        type: string
+        required: true
       dry-run:
         description: "Build wheels but skip the upload"
         type: boolean
         required: false
         default: false
     secrets:
-      upload-token:
-        description: "Token with contents:write on release-repo (fine-grained PAT or App token)"
+      upload-private-key:
+        description: "PEM private key of the GitHub App identified by upload-client-id"
         required: true
 
 permissions:
@@ -101,6 +105,25 @@ jobs:
           echo "worlds=${CHANGED}" >> "$GITHUB_OUTPUT"
           echo "Changed worlds: ${CHANGED:-(none)}"
 
+      - name: Resolve release repo owner/name
+        id: relrepo
+        if: steps.changed.outputs.worlds != ''
+        env:
+          RELEASE_REPO: ${{ inputs.release-repo }}
+        run: |
+          echo "owner=${RELEASE_REPO%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${RELEASE_REPO#*/}"   >> "$GITHUB_OUTPUT"
+
+      - name: Mint upload token (GitHub App)
+        id: app-token
+        if: steps.changed.outputs.worlds != ''
+        uses: actions/create-github-app-token@v3   # pin to a commit SHA in practice
+        with:
+          client-id: ${{ inputs.upload-client-id }}
+          private-key: ${{ secrets.upload-private-key }}
+          owner: ${{ steps.relrepo.outputs.owner }}
+          repositories: ${{ steps.relrepo.outputs.name }}
+
       - name: Build + upload wheels
         if: steps.changed.outputs.worlds != ''
         env:
@@ -112,7 +135,7 @@ jobs:
           SEED_OVERRIDES_DIR: ${{ github.workspace }}/gen-pymod-release/seed_overrides
           SEED_RELEASE_REPO: ${{ inputs.release-repo }}
           SEED_RELEASE_TAG: ${{ inputs.release-tag }}
-          GH_TOKEN: ${{ secrets.upload-token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set +e   # one world's build failure must not block uploading the rest
           SCRIPT="${GITHUB_WORKSPACE}/gen-pymod-release/scripts/seed_wheels.py"
