@@ -555,13 +555,19 @@ def cmd_upload(args: argparse.Namespace) -> int:
             print(f"(dry-run) Release {RELEASE_TAG} does not yet exist; would create it.")
             existing: set[str] = set()
         else:
-            print(f"Creating release {RELEASE_TAG} on {RELEASE_REPO}...")
+            print(f"Creating DRAFT release {RELEASE_TAG} on {RELEASE_REPO}...")
+            # Create as a DRAFT and publish only after every wheel is uploaded and
+            # verified (see end of upload). The `release: published` webhook wakes
+            # Oliver to open the Index PR; publishing before the uploads finished
+            # raced him into reading a partial asset set and silently dropping the
+            # not-yet-attached worlds (e.g. 1 of 19).
             create = subprocess.run(
                 [
                     "gh", "release", "create", RELEASE_TAG,
                     "--repo", RELEASE_REPO,
                     "--title", RELEASE_TITLE,
                     "--notes", RELEASE_NOTES,
+                    "--draft",
                 ],
                 text=True,
             )
@@ -653,6 +659,19 @@ def cmd_upload(args: argparse.Namespace) -> int:
         print(f"[err] {len(missing)} wheels missing from release: {missing[:5]}…")
         return 1
     print(f"Verified: all {len(targets)} targeted wheels are on the release.")
+
+    # Publish now — created as a draft, so the `release: published` webhook (which
+    # wakes Oliver to open the Index PR) fires exactly ONCE, after every wheel is
+    # attached and verified. Idempotent: --draft=false on an already-published
+    # release is a no-op, so a re-run that left a draft behind still publishes it.
+    print(f"Publishing release {RELEASE_TAG}...")
+    publish = subprocess.run(
+        ["gh", "release", "edit", RELEASE_TAG, "--repo", RELEASE_REPO, "--draft=false"],
+        text=True,
+    )
+    if publish.returncode != 0:
+        print("[err] gh release edit --draft=false failed")
+        return 1
     return 0
 
 
