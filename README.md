@@ -280,6 +280,8 @@ changes cut a new major. Pin to a SHA (`@<full-sha>`) for full reproducibility.
 scripts/
   prepare_apworld_release.py       local helper that creates the tag + draft GitHub Release
   shape_tree.py                  build the temp orphan tree from caller's worlds/<apworld>/
+  build_apworld_wheel.py         local one-shot wrapper: shape_tree + `python -m build --wheel`
+                                 for fork authors building the wheel by hand (no CI)
 templates/
   pyproject.toml.j2              fallback per-world pyproject (only used when caller has none)
   README.md.j2                   auto-generated README that ships inside the wheel

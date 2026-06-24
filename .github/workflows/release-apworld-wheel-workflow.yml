@@ -1,9 +1,10 @@
 name: Release apworld-wheel-workflow
 
-# Bundles the four files needed for a self-contained per-world build into a
-# single .zip and attaches it to a GitHub Release. Three of those files are
-# the canonical scripts/templates already in this repo; the fourth is the
-# drop-in workflow under workflow_zip/.
+# Bundles the files needed for a self-contained per-world build into a single
+# .zip and attaches it to a GitHub Release. Most are the canonical
+# scripts/templates already in this repo; one is the drop-in workflow under
+# workflow_zip/. build_apworld_wheel.py is the manual local-build wrapper for
+# authors who don't use CI (see the "Basic Manual" flow in the Index docs).
 #
 # The release is the public distribution point for maintainers who want the
 # per-fork drop-in workflow without referencing this repo at runtime.
@@ -56,13 +57,14 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Verify all four bundle source files are present
+      - name: Verify all bundle source files are present
         run: |
           set -euo pipefail
           missing=0
           for f in \
             workflow_zip/make_pyproject.yml \
             scripts/shape_tree.py \
+            scripts/build_apworld_wheel.py \
             templates/README.md.j2 \
             templates/pyproject.toml.j2
           do
@@ -89,6 +91,7 @@ jobs:
           mkdir -p "${bundle}/tools/build/templates"
           cp workflow_zip/make_pyproject.yml   "${bundle}/.github/workflows/make_pyproject.yml"
           cp scripts/shape_tree.py             "${bundle}/tools/build/scripts/shape_tree.py"
+          cp scripts/build_apworld_wheel.py    "${bundle}/tools/build/scripts/build_apworld_wheel.py"
           cp templates/README.md.j2            "${bundle}/tools/build/templates/README.md.j2"
           cp templates/pyproject.toml.j2       "${bundle}/tools/build/templates/pyproject.toml.j2"
           # games.json stub so the maintainer sees the shape they need to fill in.
