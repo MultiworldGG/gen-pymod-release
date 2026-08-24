@@ -52,6 +52,19 @@ def _require_build_module() -> None:
         )
 
 
+def _require_tomli_w(shape_tree) -> None:
+    """shape_tree injects [project.entry-points."mwgg.client"] only on its tomli_w
+    rewrite path, and the pyproject template carries no entry-points block of its
+    own -- so without tomli_w the wheel builds clean and ships no launch hook."""
+    if not shape_tree._HAS_TOMLI_W:
+        raise SystemExit(
+            f"tomli_w is not importable in {sys.executable}, so shape_tree would "
+            "silently drop the mwgg.client launch hook (and version/authors "
+            "injection) from this wheel. Install it with:\n"
+            "    python -m pip install tomli_w"
+        )
+
+
 def _caller_repo_from_manifest(manifest_path: Path) -> str:
     """Cosmetic metadata only (lands in .shape_info.json, not in the wheel)."""
     try:
@@ -80,19 +93,11 @@ def main(argv: list[str] | None = None) -> int:
 
     _require_build_module()
     shape_tree = _load_shape_tree()
+    _require_tomli_w(shape_tree)
 
     source_root = args.source_root.resolve()
     manifest_path = source_root / "worlds" / args.apworld / "archipelago.json"
     caller_repo = _caller_repo_from_manifest(manifest_path)
-
-    if (source_root / "worlds" / args.apworld / "pyproject.toml").is_file() \
-            and importlib.util.find_spec("tomli_w") is None:
-        print(
-            "::warning::worlds/{0}/pyproject.toml ships its own metadata but tomli_w "
-            "is not installed, so version/authors injection is skipped (the wheel may "
-            "carry a stale version). Run: python -m pip install tomli_w".format(args.apworld),
-            file=sys.stderr,
-        )
 
     build_root = Path(tempfile.mkdtemp(prefix=f"{args.apworld}-wheel-"))
     tree_dir = build_root / "orphan-tree"
