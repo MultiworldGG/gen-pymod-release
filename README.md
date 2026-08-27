@@ -226,6 +226,20 @@ If you ship `worlds/<apworld>/pyproject.toml`, it is used as-is — `version`,
 `authors`, and `description` are injected from `archipelago.json` only when
 missing. Otherwise a minimal default is generated.
 
+### Launcher components in the manifest
+
+The `archipelago.json` inside the shaped wheel carries a `components` key: the
+list the MultiworldGG launcher renders without importing world code. Each entry
+mirrors one of the world's `LauncherComponents.Component` registrations —
+`{"name": <display_name>, "type": "client"|"tool"|"adjuster"}` plus an optional
+`"description"`; `MISC` and `HIDDEN` components are never declared.
+
+If your source `archipelago.json` hand-authors a `components` list, it is
+authoritative and ships unchanged; the build only warns when it disagrees with
+the registrations found by static scan. Without one, the list is derived
+automatically from the world source and written into the wheel's copy of the
+manifest — your source file is not modified.
+
 ## Inputs
 
 | name | required | default | notes |

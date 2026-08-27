@@ -245,6 +245,169 @@ def _resolve_relative_import(node: ast.ImportFrom, file_module: str, is_init: bo
     return ".".join(target_parts)
 
 
+def _collect_type_aliases(tree: ast.AST) -> set[str]:
+    """Local names that refer to LauncherComponents.Type. It's frequently
+    aliased on import (e.g. `from worlds.LauncherComponents import
+    Type as ComponentType`), so `component_type=ComponentType.CLIENT`
+    is the same as `Type.CLIENT`. Seed with the canonical name so plain
+    `Type.CLIENT` always matches; collect aliases only from
+    LauncherComponents imports to avoid e.g. `typing.Type` false matches."""
+    type_aliases: set[str] = {"Type"}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.ImportFrom) and node.module
+                and node.module.split(".")[-1] == "LauncherComponents"):
+            for alias in node.names:
+                if alias.name == "Type":
+                    type_aliases.add(alias.asname or "Type")
+    return type_aliases
+
+
+def _str_assigns(node: ast.stmt):
+    """(name, value) pairs bound by a plain or annotated `NAME = "literal"`."""
+    if (isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)):
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                yield target.id, node.value.value
+    elif (isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)):
+        yield node.target.id, node.value.value
+
+
+def _module_str_constants(tree: ast.AST) -> dict[str, str]:
+    """NAME → value for `NAME = "literal"` assignments anywhere in the file,
+    plus class-qualified `Cls.NAME` keys for class-body assignments, so display
+    names passed by constant (e.g. CLIENT_NAME, RAC3OPTION.GAME_TITLE) resolve."""
+    out: dict[str, str] = {}
+    for node in ast.walk(tree):
+        for name, value in _str_assigns(node):
+            out[name] = value
+        if isinstance(node, ast.ClassDef):
+            for stmt in node.body:
+                for name, value in _str_assigns(stmt):
+                    out[f"{node.name}.{name}"] = value
+    return out
+
+
+def _imported_str_constants(tree: ast.AST, py_file: Path, world_dir: Path,
+                            cache: dict[Path, dict[str, str]]) -> dict[str, str]:
+    """Constants bound by importing from another module inside the world — one
+    hop, relative (`from .X import NAME`) or absolute into the world's own
+    package (`from worlds.<apworld>.X import NAME`) — so display names like
+    f"{GAME_NAME} Client" resolve when the constant lives in a sibling module.
+    Importing a class also binds its `Cls.NAME` qualified constants."""
+    out: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if node.level >= 1:
+            base = py_file.parent
+            for _ in range(node.level - 1):
+                base = base.parent
+            if node.module:
+                base = base.joinpath(*node.module.split("."))
+        else:
+            parts = (node.module or "").split(".")
+            if parts[:2] != ["worlds", world_dir.name]:
+                continue
+            base = world_dir.joinpath(*parts[2:])
+        for candidate in (base.with_suffix(".py"), base / "__init__.py"):
+            if not (candidate.is_file() and world_dir in candidate.parents):
+                continue
+            if candidate not in cache:
+                try:
+                    cache[candidate] = _module_str_constants(
+                        ast.parse(candidate.read_text(encoding="utf-8")))
+                except (SyntaxError, UnicodeDecodeError, OSError):
+                    cache[candidate] = {}
+            for alias in node.names:
+                if alias.name == "*":
+                    out.update(cache[candidate])
+                    continue
+                bound = alias.asname or alias.name
+                for key, value in cache[candidate].items():
+                    if key == alias.name:
+                        out[bound] = value
+                    elif key.startswith(f"{alias.name}."):
+                        out[bound + key[len(alias.name):]] = value
+            break
+    return out
+
+
+def _is_component_call(node: ast.Call) -> bool:
+    """Component(...) by bare name, or via a LauncherComponents module binding
+    (e.g. `LauncherComponents.Component(...)`)."""
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id == "Component"
+    if isinstance(func, ast.Attribute) and func.attr == "Component":
+        base = func.value
+        if isinstance(base, ast.Name):
+            return base.id == "LauncherComponents"
+        if isinstance(base, ast.Attribute):
+            return base.attr == "LauncherComponents"
+    return False
+
+
+def _component_declared_type(node: ast.Call, type_aliases: set[str]) -> tuple[Optional[str], bool]:
+    """(Type member name, explicit?) from a Component(...) call's component_type
+    kwarg. (None, True) means an explicit value we can't resolve statically; an
+    explicit None constant defers to display-name inference like the runtime."""
+    for kw in node.keywords:
+        if kw.arg != "component_type":
+            continue
+        v = kw.value
+        if isinstance(v, ast.Constant) and v.value is None:
+            return None, False
+        if isinstance(v, ast.Attribute):
+            base = v.value
+            if isinstance(base, ast.Name) and base.id in type_aliases:
+                return v.attr, True
+            # Dotted access, e.g. `LauncherComponents.Type.CLIENT`.
+            if isinstance(base, ast.Attribute) and base.attr == "Type":
+                return v.attr, True
+        return None, True
+    return None, False
+
+
+def _resolve_str_expr(expr: ast.expr, str_constants: dict[str, str]) -> Optional[str]:
+    """Statically resolve a string expression: a literal, a module constant, or
+    an f-string whose parts are those (e.g. f"{GAME_NAME} Client")."""
+    if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+        return expr.value
+    if isinstance(expr, ast.Name):
+        return str_constants.get(expr.id)
+    if isinstance(expr, ast.Attribute) and isinstance(expr.value, ast.Name):
+        return str_constants.get(f"{expr.value.id}.{expr.attr}")
+    if isinstance(expr, ast.JoinedStr):
+        parts: list[str] = []
+        for value in expr.values:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                parts.append(value.value)
+                continue
+            if (isinstance(value, ast.FormattedValue) and value.format_spec is None
+                    and value.conversion == -1):
+                resolved = _resolve_str_expr(value.value, str_constants)
+                if resolved is not None:
+                    parts.append(resolved)
+                    continue
+            return None
+        return "".join(parts)
+    return None
+
+
+def _component_display_name(node: ast.Call, str_constants: dict[str, str]) -> Optional[str]:
+    """Statically resolvable display name from the display_name kwarg or first
+    positional arg."""
+    exprs = [kw.value for kw in node.keywords if kw.arg == "display_name"]
+    if not exprs and node.args:
+        exprs = [node.args[0]]
+    return _resolve_str_expr(exprs[0], str_constants) if exprs else None
+
+
 def parse_client_entry_points(world_dir: Path, apworld: str) -> list[tuple[str, str]]:
     """Static-analysis pass to discover Type.CLIENT Component(...) registrations.
 
@@ -298,6 +461,7 @@ def parse_client_entry_points(world_dir: Path, apworld: str) -> list[tuple[str, 
     pkg_root = f"worlds.{apworld}"
     results: list[tuple[str, str]] = []
     seen_targets: set[tuple[str, str]] = set()
+    constants_cache: dict[Path, dict[str, str]] = {}
 
     for py_file in sorted(world_dir.rglob("*.py")):
         try:
@@ -309,19 +473,9 @@ def parse_client_entry_points(world_dir: Path, apworld: str) -> list[tuple[str, 
         file_module = _file_module_path(py_file, world_dir, apworld)
         is_init = py_file.name == "__init__.py"
 
-        # Local names that refer to LauncherComponents.Type. It's frequently
-        # aliased on import (e.g. `from worlds.LauncherComponents import
-        # Type as ComponentType`), so `component_type=ComponentType.CLIENT`
-        # is the same as `Type.CLIENT`. Seed with the canonical name so plain
-        # `Type.CLIENT` always matches; collect aliases only from
-        # LauncherComponents imports to avoid e.g. `typing.Type` false matches.
-        type_aliases: set[str] = {"Type"}
-        for node in ast.walk(tree):
-            if (isinstance(node, ast.ImportFrom) and node.module
-                    and node.module.split(".")[-1] == "LauncherComponents"):
-                for alias in node.names:
-                    if alias.name == "Type":
-                        type_aliases.add(alias.asname or "Type")
+        type_aliases = _collect_type_aliases(tree)
+        str_constants = {**_imported_str_constants(tree, py_file, world_dir, constants_cache),
+                         **_module_str_constants(tree)}
 
         # local_name → (target_module, original_attr)
         local_to_target: dict[str, tuple[str, str]] = {}
@@ -345,41 +499,23 @@ def parse_client_entry_points(world_dir: Path, apworld: str) -> list[tuple[str, 
                         local_to_target[target.id] = (file_module, target.id)
 
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            if not (isinstance(node.func, ast.Name) and node.func.id == "Component"):
+            if not (isinstance(node, ast.Call) and _is_component_call(node)):
                 continue
 
-            ctype_is_client = False
-            ctype_explicit = False
-            display_name_str: Optional[str] = None
+            member, ctype_explicit = _component_declared_type(node, type_aliases)
+            display_name_str = _component_display_name(node, str_constants)
             func_name: Optional[str] = None
             for kw in node.keywords:
-                if kw.arg == "component_type":
-                    ctype_explicit = True
-                    v = kw.value
-                    if (isinstance(v, ast.Attribute) and v.attr == "CLIENT"
-                            and isinstance(v.value, ast.Name)
-                            and v.value.id in type_aliases):
-                        ctype_is_client = True
-                elif kw.arg == "func":
-                    if isinstance(kw.value, ast.Name):
-                        func_name = kw.value.id
-                elif kw.arg == "display_name":
-                    if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
-                        display_name_str = kw.value.value
-
-            # display_name is also accepted as the first positional arg.
-            if display_name_str is None and node.args:
-                first = node.args[0]
-                if isinstance(first, ast.Constant) and isinstance(first.value, str):
-                    display_name_str = first.value
+                if kw.arg == "func" and isinstance(kw.value, ast.Name):
+                    func_name = kw.value.id
 
             # Mirror LauncherComponents.Component.__init__ type inference: if no
             # explicit component_type is given and the display name contains
             # "Client", the runtime treats it as Type.CLIENT.
-            if not ctype_explicit and display_name_str and "Client" in display_name_str:
-                ctype_is_client = True
+            if ctype_explicit:
+                ctype_is_client = member == "CLIENT"
+            else:
+                ctype_is_client = bool(display_name_str and "Client" in display_name_str)
 
             if not (ctype_is_client and func_name):
                 continue
@@ -438,6 +574,113 @@ def parse_client_entry_points(world_dir: Path, apworld: str) -> list[tuple[str, 
             results.append((ep_key, ep_value))
 
     return results
+
+
+# Type enum members a manifest may declare, mapped to their manifest spelling.
+# MISC and HIDDEN registrations exist at runtime but are never declared
+# (mirrors LauncherComponents._MANIFEST_COMPONENT_TYPES in the monorepo).
+_MANIFEST_TYPE_BY_MEMBER = {"CLIENT": "client", "TOOL": "tool", "ADJUSTER": "adjuster"}
+_MANIFEST_COMPONENT_TYPES = frozenset(_MANIFEST_TYPE_BY_MEMBER.values())
+
+
+def parse_component_registrations(world_dir: Path) -> list[dict[str, str]]:
+    """Static mirror of the world's Component(...) registrations, as manifest
+    `components` entries: [{"name", "type"[, "description"]}], CLIENT/TOOL/
+    ADJUSTER only. The launcher renders these without importing world code
+    (LauncherComponents.world_manifest_components in the monorepo). Same
+    constraint as parse_client_entry_points: this never imports the world, so
+    registrations whose display name or explicit component_type can't be
+    resolved statically are skipped.
+    """
+    entries: list[dict[str, str]] = []
+    seen_names: set[str] = set()
+    constants_cache: dict[Path, dict[str, str]] = {}
+    for py_file in sorted(world_dir.rglob("*.py")):
+        try:
+            tree = ast.parse(py_file.read_text(encoding="utf-8"))
+        except (SyntaxError, UnicodeDecodeError) as exc:
+            logging.warning("Skipping %s during component-registration scan: %s", py_file, exc)
+            continue
+        type_aliases = _collect_type_aliases(tree)
+        str_constants = {**_imported_str_constants(tree, py_file, world_dir, constants_cache),
+                         **_module_str_constants(tree)}
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and _is_component_call(node)):
+                continue
+            display_name = _component_display_name(node, str_constants)
+            if display_name is None or display_name in seen_names:
+                continue
+            member, explicit = _component_declared_type(node, type_aliases)
+            if member is None and explicit:
+                continue
+            if member is None:
+                # Mirror LauncherComponents.Component.__init__ inference.
+                member = ("CLIENT" if "Client" in display_name
+                          else "ADJUSTER" if "Adjuster" in display_name else "MISC")
+            manifest_type = _MANIFEST_TYPE_BY_MEMBER.get(member)
+            if manifest_type is None:
+                continue
+            seen_names.add(display_name)
+            entry = {"name": display_name, "type": manifest_type}
+            for kw in node.keywords:
+                if kw.arg == "description":
+                    description = _resolve_str_expr(kw.value, str_constants)
+                    if description:
+                        entry["description"] = description
+            entries.append(entry)
+    return entries
+
+
+def _coerce_manifest_component(entry, source: str) -> Optional[dict[str, str]]:
+    """Same rules as LauncherComponents._coerce_manifest_component in the
+    monorepo: a mapping with a non-empty str name and a type in
+    client/tool/adjuster; unknown keys ignored. Returns the normalized fields,
+    or None (with a warning) for an entry the launcher scan would skip."""
+    if not isinstance(entry, dict):
+        logging.warning("::warning::%s: malformed components entry (expected a mapping): %r",
+                        source, entry)
+        return None
+    name = entry.get("name")
+    if not isinstance(name, str) or not name:
+        logging.warning("::warning::%s: components entry without a name: %r", source, entry)
+        return None
+    component_type = entry.get("type")
+    if component_type not in _MANIFEST_COMPONENT_TYPES:
+        logging.warning("::warning::%s: components entry %r with unknown type %r",
+                        source, name, component_type)
+        return None
+    description = entry.get("description", "")
+    if not isinstance(description, str):
+        description = ""
+    return {"name": name, "type": component_type, "description": description}
+
+
+def _warn_component_mismatches(declared: list, derived: list[dict[str, str]], source: str) -> None:
+    """A hand-authored components list stays authoritative; only warn where it
+    disagrees with the static registration scan. The scan can miss dynamic
+    registrations, so mismatches never fail the build."""
+    declared_by_name: dict[str, dict[str, str]] = {}
+    for entry in declared:
+        fields = _coerce_manifest_component(entry, source)
+        if fields is not None:
+            declared_by_name[fields["name"]] = fields
+    derived_by_name = {entry["name"]: entry for entry in derived}
+    for name, fields in declared_by_name.items():
+        found = derived_by_name.get(name)
+        if found is None:
+            logging.warning(
+                "::warning::%s: components entry %r has no matching Component "
+                "registration in the static scan; its launcher card may fail to run.",
+                source, name)
+        elif found["type"] != fields["type"]:
+            logging.warning(
+                "::warning::%s: components entry %r declares type %r but the world "
+                "registers it as %r.", source, name, fields["type"], found["type"])
+    for name in derived_by_name.keys() - declared_by_name.keys():
+        logging.warning(
+            "::warning::%s: world registers component %r but the hand-authored "
+            "components list does not declare it; it will not appear in the launcher.",
+            source, name)
 
 
 # pip-only directive flags (anything after these on the line is not a PEP 508 spec).
@@ -700,6 +943,31 @@ def shape(
 
     client_entry_points = parse_client_entry_points(copied_world_dir, apworld)
 
+    # Populate the manifest `components` mirror the launcher scans import-free.
+    # A hand-authored list in the caller's archipelago.json is authoritative and
+    # ships unchanged (validated warn-only); otherwise the statically derived
+    # list is written into the *copied* manifest — the caller's source file is
+    # never touched.
+    derived_components = parse_component_registrations(copied_world_dir)
+    declared_components = archipelago_json.get("components")
+    manifest_source = f"worlds/{apworld}/archipelago.json"
+    if declared_components is None:
+        manifest_components = derived_components or None
+        if derived_components:
+            manifest_data = dict(archipelago_json)
+            manifest_data["components"] = derived_components
+            (copied_world_dir / "archipelago.json").write_text(
+                json.dumps(manifest_data, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+    elif isinstance(declared_components, list):
+        _warn_component_mismatches(declared_components, derived_components, manifest_source)
+        manifest_components = declared_components
+    else:
+        logging.warning('::warning::%s: "components" should be a list, got %s',
+                        manifest_source, type(declared_components).__name__)
+        manifest_components = None
+
     requirements_path = caller_world_dir / "requirements.txt"
     requirements_deps = (
         parse_requirements_txt(requirements_path)
@@ -746,10 +1014,10 @@ def shape(
     )
     (output_dir / "MANIFEST.in").write_text(manifest_text, encoding="utf-8")
 
-    # Single source of truth for downstream workflow steps. build.yml reads
-    # this instead of re-parsing archipelago.json. The fields here are exactly
-    # the ones build.yml needs: apworld for sanity logging, world_version for the
-    # tag-skew check, and game for human-readable summaries.
+    # Single source of truth for downstream workflow steps. build.yml and
+    # seed_wheels.py read this instead of re-parsing archipelago.json.
+    # `components` is the list shipped in the copied manifest (hand-authored or
+    # derived), or null when the manifest carries no components key.
     shape_info = {
         "apworld": apworld,
         "world_version": str(archipelago_json["world_version"]).strip(),
@@ -761,6 +1029,7 @@ def shape(
             {"name": k, "target": v} for k, v in client_entry_points
         ],
         "dependencies": list(requirements_deps),
+        "components": manifest_components,
     }
     (output_dir / ".shape_info.json").write_text(
         json.dumps(shape_info, indent=2) + "\n", encoding="utf-8",
@@ -783,6 +1052,16 @@ def shape(
             print(f"    {dep}")
     else:
         print("  dependencies:    (none)")
+    if manifest_components:
+        origin = "hand-authored" if declared_components is not None else "derived"
+        print(f"  components:      {len(manifest_components)} ({origin})")
+        for entry in manifest_components:
+            if isinstance(entry, dict):
+                print(f"    {entry.get('name')} ({entry.get('type')})")
+            else:
+                print(f"    {entry!r}")
+    else:
+        print("  components:      (none)")
 
 
 def _cli(argv: Optional[list[str]] = None) -> int:

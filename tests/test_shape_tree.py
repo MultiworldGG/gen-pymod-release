@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import logging
 import sys
 import tempfile
@@ -260,6 +261,30 @@ class ParseClientEntryPointsTests(unittest.TestCase):
             ],
         )
 
+    # --- Module-attribute Component call (peggle, openrct2) ------------------
+
+    def test_module_attribute_component_call(self) -> None:
+        # Component, dispatch, and Type all accessed via the module binding.
+        source = """
+            import worlds.LauncherComponents as LauncherComponents
+
+            def launch_client(*args):
+                from .client import main
+                LauncherComponents.launch(main, args=args)
+
+            LauncherComponents.components.append(
+                LauncherComponents.Component(
+                    "Demo Client",
+                    func=launch_client,
+                    component_type=LauncherComponents.Type.CLIENT,
+                )
+            )
+        """
+        self.assertEqual(
+            self.parse(source),
+            [("worlds.demo.Client", "worlds.demo.client:main")],
+        )
+
     # --- Non-identifier apworld (2048) ---------------------------------------
 
     def test_non_identifier_apworld_returns_empty(self) -> None:
@@ -273,6 +298,310 @@ class ParseClientEntryPointsTests(unittest.TestCase):
             components.append(Component("2048 Client", func=launch_client, component_type=Type.CLIENT))
         """
         self.assertEqual(self.parse(source, "2048"), [])
+
+
+class ParseComponentRegistrationsTests(unittest.TestCase):
+    def parse(self, source: str, extra_files: dict[str, str] | None = None) -> list[dict[str, str]]:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "__init__.py").write_text(
+                textwrap.dedent(source), encoding="utf-8"
+            )
+            for rel, content in (extra_files or {}).items():
+                path = Path(tmp) / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(textwrap.dedent(content), encoding="utf-8")
+            return shape_tree.parse_component_registrations(Path(tmp))
+
+    def test_explicit_types_with_description(self) -> None:
+        source = """
+            from worlds.LauncherComponents import Component, components, Type
+
+            components.append(Component("Demo Client", func=None, component_type=Type.CLIENT,
+                                        description="Connects Demo to the multiworld"))
+            components.append(Component("Demo Tracker", func=None, component_type=Type.TOOL))
+            components.append(Component("Demo Fixer", func=None, component_type=Type.ADJUSTER))
+        """
+        self.assertEqual(
+            self.parse(source),
+            [
+                {"name": "Demo Client", "type": "client",
+                 "description": "Connects Demo to the multiworld"},
+                {"name": "Demo Tracker", "type": "tool"},
+                {"name": "Demo Fixer", "type": "adjuster"},
+            ],
+        )
+
+    def test_display_name_inference(self) -> None:
+        # No explicit component_type: "Client"/"Adjuster" in the name infers the
+        # type; anything else is MISC and never declared.
+        source = """
+            from worlds.LauncherComponents import Component, components
+
+            components.append(Component("Demo Client", func=None))
+            components.append(Component("Demo Adjuster", func=None))
+            components.append(Component("Demo Thing", func=None))
+        """
+        self.assertEqual(
+            self.parse(source),
+            [
+                {"name": "Demo Client", "type": "client"},
+                {"name": "Demo Adjuster", "type": "adjuster"},
+            ],
+        )
+
+    def test_hidden_and_misc_excluded(self) -> None:
+        source = """
+            from worlds.LauncherComponents import Component, components, Type
+
+            components.append(Component("Demo Client", func=None, component_type=Type.HIDDEN))
+            components.append(Component("Demo Helper", func=None, component_type=Type.MISC))
+        """
+        self.assertEqual(self.parse(source), [])
+
+    def test_aliased_type_and_constant_display_name(self) -> None:
+        source = """
+            from worlds.LauncherComponents import Component, components, Type as ComponentType
+
+            TRACKER_NAME = "Demo Map Tracker"
+
+            components.append(Component(TRACKER_NAME, func=None, component_type=ComponentType.TOOL))
+        """
+        self.assertEqual(
+            self.parse(source),
+            [{"name": "Demo Map Tracker", "type": "tool"}],
+        )
+
+    def test_unresolvable_explicit_type_skipped(self) -> None:
+        source = """
+            from worlds.LauncherComponents import Component, components
+
+            chosen = object()
+            components.append(Component("Demo Client", func=None, component_type=chosen))
+        """
+        self.assertEqual(self.parse(source), [])
+
+    def test_duplicate_display_names_deduped(self) -> None:
+        source = """
+            from worlds.LauncherComponents import Component, components, Type
+
+            components.append(Component("Demo Client", func=None, component_type=Type.CLIENT))
+            components.append(Component("Demo Client", func=None, component_type=Type.CLIENT))
+        """
+        self.assertEqual(
+            self.parse(source),
+            [{"name": "Demo Client", "type": "client"}],
+        )
+
+    def test_fstring_display_name_with_module_constant(self) -> None:
+        # saving_princess shape: f"{GAME_NAME} Client" with a same-file constant.
+        source = """
+            from worlds.LauncherComponents import Component, components, Type as ComponentType
+
+            GAME_NAME = "Demo"
+
+            components.append(Component(f"{GAME_NAME} Client", func=None,
+                                        component_type=ComponentType.CLIENT))
+        """
+        self.assertEqual(
+            self.parse(source),
+            [{"name": "Demo Client", "type": "client"}],
+        )
+
+    def test_fstring_display_name_no_placeholders(self) -> None:
+        # ufo50 shape: a bare f-string literal.
+        source = """
+            from worlds.LauncherComponents import Component, components, Type
+
+            components.append(Component(f"UFO 50", func=None, component_type=Type.CLIENT))
+        """
+        self.assertEqual(
+            self.parse(source),
+            [{"name": "UFO 50", "type": "client"}],
+        )
+
+    def test_fstring_unresolvable_placeholder_skipped(self) -> None:
+        # rac3 shape: the placeholder is a class attribute — not resolvable.
+        source = """
+            from worlds.LauncherComponents import Component, components, Type
+            from .options import OPTION
+
+            components.append(Component(f"{OPTION.GAME_TITLE} Client", func=None,
+                                        component_type=Type.CLIENT))
+        """
+        self.assertEqual(self.parse(source), [])
+
+    def test_constant_imported_from_sibling_module(self) -> None:
+        # bfbb/ladx shape: the display-name constant lives one relative hop away.
+        source = """
+            from worlds.LauncherComponents import Component, components, Type
+            from .constants import game_name
+
+            components.append(Component(f"{game_name} Client", func=None,
+                                        component_type=Type.CLIENT))
+        """
+        self.assertEqual(
+            self.parse(source, {"constants/__init__.py": 'game_name = "Demo"\n'}),
+            [{"name": "Demo Client", "type": "client"}],
+        )
+
+    def test_star_imported_annotated_constant(self) -> None:
+        # saving_princess/ladx_beta shape: `from .Constants import *` pulling in
+        # an annotated `GAME_NAME: str = "..."`.
+        source = """
+            from worlds.LauncherComponents import Component, components, Type
+            from .Constants import *
+
+            components.append(Component(f"{GAME_NAME} Client", func=None,
+                                        component_type=Type.CLIENT))
+        """
+        self.assertEqual(
+            self.parse(source, {"Constants.py": 'GAME_NAME: str = "Demo"\n'}),
+            [{"name": "Demo Client", "type": "client"}],
+        )
+
+    def test_class_attribute_constant_via_absolute_import(self) -> None:
+        # rac3 shape: `from worlds.<apworld>.constants.options import OPTS` with
+        # the display name interpolating a class attribute.
+        source = """
+            from worlds.LauncherComponents import Component, components, Type
+            from worlds.demo.constants.options import OPTS
+
+            components.append(Component(f"{OPTS.GAME_TITLE} Client", func=None,
+                                        component_type=Type.CLIENT))
+        """
+        options_source = """
+            class OPTS:
+                GAME_TITLE = "Demo"
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            world_dir = Path(tmp) / "demo"
+            options_path = world_dir / "constants" / "options.py"
+            options_path.parent.mkdir(parents=True)
+            (world_dir / "__init__.py").write_text(
+                textwrap.dedent(source), encoding="utf-8"
+            )
+            options_path.write_text(textwrap.dedent(options_source), encoding="utf-8")
+            self.assertEqual(
+                shape_tree.parse_component_registrations(world_dir),
+                [{"name": "Demo Client", "type": "client"}],
+            )
+
+    def test_attribute_call_and_dotted_type(self) -> None:
+        # peggle/openrct2 shape: module-attribute Component and dotted Type.
+        source = """
+            import worlds.LauncherComponents as LauncherComponents
+
+            LauncherComponents.components.append(
+                LauncherComponents.Component(
+                    "Demo Client",
+                    func=None,
+                    component_type=LauncherComponents.Type.CLIENT,
+                )
+            )
+        """
+        self.assertEqual(
+            self.parse(source),
+            [{"name": "Demo Client", "type": "client"}],
+        )
+
+
+TEMPLATES_DIR = SCRIPT_PATH.parents[1] / "templates"
+
+
+class ShapeComponentsTests(unittest.TestCase):
+    def shape_world(self, init_source: str, manifest: dict) -> tuple[dict, dict, dict]:
+        """Shape a synthetic world; return (source manifest after the run,
+        copied manifest, shape_info)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            source_root = Path(tmp) / "caller"
+            world_dir = source_root / "worlds" / "demo"
+            world_dir.mkdir(parents=True)
+            (world_dir / "__init__.py").write_text(
+                textwrap.dedent(init_source), encoding="utf-8"
+            )
+            manifest_path = world_dir / "archipelago.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            output_dir = Path(tmp) / "orphan"
+            shape_tree.shape(
+                source_root=source_root,
+                apworld="demo",
+                templates_dir=TEMPLATES_DIR,
+                output_dir=output_dir,
+                caller_repo="demo/demo",
+                source_ref="test",
+            )
+            source_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            copied_manifest = json.loads(
+                (output_dir / "src" / "worlds" / "demo" / "archipelago.json")
+                .read_text(encoding="utf-8")
+            )
+            shape_info = json.loads(
+                (output_dir / ".shape_info.json").read_text(encoding="utf-8")
+            )
+            return source_manifest, copied_manifest, shape_info
+
+    REGISTERING_INIT = """
+        from worlds.LauncherComponents import Component, components, Type
+
+        components.append(Component("Demo Client", func=None, component_type=Type.CLIENT))
+        components.append(Component("Demo Tracker", func=None, component_type=Type.TOOL))
+    """
+
+    def test_derived_components_written_to_copied_manifest_only(self) -> None:
+        manifest = {"game": "Demo", "world_version": "1.0.0"}
+        source_manifest, copied_manifest, shape_info = self.shape_world(
+            self.REGISTERING_INIT, manifest
+        )
+        expected = [
+            {"name": "Demo Client", "type": "client"},
+            {"name": "Demo Tracker", "type": "tool"},
+        ]
+        self.assertNotIn("components", source_manifest)
+        self.assertEqual(copied_manifest["components"], expected)
+        self.assertEqual(copied_manifest["game"], "Demo")
+        self.assertEqual(shape_info["components"], expected)
+
+    def test_hand_authored_components_ship_unchanged(self) -> None:
+        hand = [
+            {"name": "Demo Client", "type": "client", "note": "unknown keys kept"},
+        ]
+        manifest = {"game": "Demo", "world_version": "1.0.0", "components": hand}
+        logging.disable(logging.NOTSET)
+        self.addCleanup(logging.disable, logging.WARNING)
+        with self.assertLogs(level="WARNING") as logs:
+            _, copied_manifest, shape_info = self.shape_world(
+                self.REGISTERING_INIT, manifest
+            )
+        self.assertEqual(copied_manifest["components"], hand)
+        self.assertEqual(shape_info["components"], hand)
+        # "Demo Tracker" is registered but not declared — warn, never fail.
+        self.assertTrue(any("Demo Tracker" in line for line in logs.output))
+
+    def test_hand_authored_type_mismatch_warns(self) -> None:
+        hand = [
+            {"name": "Demo Client", "type": "tool"},
+            {"name": "Demo Tracker", "type": "tool"},
+        ]
+        manifest = {"game": "Demo", "world_version": "1.0.0", "components": hand}
+        logging.disable(logging.NOTSET)
+        self.addCleanup(logging.disable, logging.WARNING)
+        with self.assertLogs(level="WARNING") as logs:
+            _, copied_manifest, _ = self.shape_world(self.REGISTERING_INIT, manifest)
+        self.assertEqual(copied_manifest["components"], hand)
+        self.assertTrue(
+            any("declares type 'tool'" in line and "'client'" in line
+                for line in logs.output)
+        )
+
+    def test_no_registrations_no_components_key(self) -> None:
+        manifest = {"game": "Demo", "world_version": "1.0.0"}
+        source_manifest, copied_manifest, shape_info = self.shape_world(
+            "GAME = 'Demo'\n", manifest
+        )
+        self.assertNotIn("components", source_manifest)
+        self.assertNotIn("components", copied_manifest)
+        self.assertIsNone(shape_info["components"])
 
 
 if __name__ == "__main__":
