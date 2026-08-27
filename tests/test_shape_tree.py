@@ -261,6 +261,30 @@ class ParseClientEntryPointsTests(unittest.TestCase):
             ],
         )
 
+    # --- Module-attribute Component call (peggle, openrct2) ------------------
+
+    def test_module_attribute_component_call(self) -> None:
+        # Component, dispatch, and Type all accessed via the module binding.
+        source = """
+            import worlds.LauncherComponents as LauncherComponents
+
+            def launch_client(*args):
+                from .client import main
+                LauncherComponents.launch(main, args=args)
+
+            LauncherComponents.components.append(
+                LauncherComponents.Component(
+                    "Demo Client",
+                    func=launch_client,
+                    component_type=LauncherComponents.Type.CLIENT,
+                )
+            )
+        """
+        self.assertEqual(
+            self.parse(source),
+            [("worlds.demo.Client", "worlds.demo.client:main")],
+        )
+
     # --- Non-identifier apworld (2048) ---------------------------------------
 
     def test_non_identifier_apworld_returns_empty(self) -> None:
@@ -277,11 +301,15 @@ class ParseClientEntryPointsTests(unittest.TestCase):
 
 
 class ParseComponentRegistrationsTests(unittest.TestCase):
-    def parse(self, source: str) -> list[dict[str, str]]:
+    def parse(self, source: str, extra_files: dict[str, str] | None = None) -> list[dict[str, str]]:
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "__init__.py").write_text(
                 textwrap.dedent(source), encoding="utf-8"
             )
+            for rel, content in (extra_files or {}).items():
+                path = Path(tmp) / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(textwrap.dedent(content), encoding="utf-8")
             return shape_tree.parse_component_registrations(Path(tmp))
 
     def test_explicit_types_with_description(self) -> None:
@@ -358,6 +386,118 @@ class ParseComponentRegistrationsTests(unittest.TestCase):
 
             components.append(Component("Demo Client", func=None, component_type=Type.CLIENT))
             components.append(Component("Demo Client", func=None, component_type=Type.CLIENT))
+        """
+        self.assertEqual(
+            self.parse(source),
+            [{"name": "Demo Client", "type": "client"}],
+        )
+
+    def test_fstring_display_name_with_module_constant(self) -> None:
+        # saving_princess shape: f"{GAME_NAME} Client" with a same-file constant.
+        source = """
+            from worlds.LauncherComponents import Component, components, Type as ComponentType
+
+            GAME_NAME = "Demo"
+
+            components.append(Component(f"{GAME_NAME} Client", func=None,
+                                        component_type=ComponentType.CLIENT))
+        """
+        self.assertEqual(
+            self.parse(source),
+            [{"name": "Demo Client", "type": "client"}],
+        )
+
+    def test_fstring_display_name_no_placeholders(self) -> None:
+        # ufo50 shape: a bare f-string literal.
+        source = """
+            from worlds.LauncherComponents import Component, components, Type
+
+            components.append(Component(f"UFO 50", func=None, component_type=Type.CLIENT))
+        """
+        self.assertEqual(
+            self.parse(source),
+            [{"name": "UFO 50", "type": "client"}],
+        )
+
+    def test_fstring_unresolvable_placeholder_skipped(self) -> None:
+        # rac3 shape: the placeholder is a class attribute — not resolvable.
+        source = """
+            from worlds.LauncherComponents import Component, components, Type
+            from .options import OPTION
+
+            components.append(Component(f"{OPTION.GAME_TITLE} Client", func=None,
+                                        component_type=Type.CLIENT))
+        """
+        self.assertEqual(self.parse(source), [])
+
+    def test_constant_imported_from_sibling_module(self) -> None:
+        # bfbb/ladx shape: the display-name constant lives one relative hop away.
+        source = """
+            from worlds.LauncherComponents import Component, components, Type
+            from .constants import game_name
+
+            components.append(Component(f"{game_name} Client", func=None,
+                                        component_type=Type.CLIENT))
+        """
+        self.assertEqual(
+            self.parse(source, {"constants/__init__.py": 'game_name = "Demo"\n'}),
+            [{"name": "Demo Client", "type": "client"}],
+        )
+
+    def test_star_imported_annotated_constant(self) -> None:
+        # saving_princess/ladx_beta shape: `from .Constants import *` pulling in
+        # an annotated `GAME_NAME: str = "..."`.
+        source = """
+            from worlds.LauncherComponents import Component, components, Type
+            from .Constants import *
+
+            components.append(Component(f"{GAME_NAME} Client", func=None,
+                                        component_type=Type.CLIENT))
+        """
+        self.assertEqual(
+            self.parse(source, {"Constants.py": 'GAME_NAME: str = "Demo"\n'}),
+            [{"name": "Demo Client", "type": "client"}],
+        )
+
+    def test_class_attribute_constant_via_absolute_import(self) -> None:
+        # rac3 shape: `from worlds.<apworld>.constants.options import OPTS` with
+        # the display name interpolating a class attribute.
+        source = """
+            from worlds.LauncherComponents import Component, components, Type
+            from worlds.demo.constants.options import OPTS
+
+            components.append(Component(f"{OPTS.GAME_TITLE} Client", func=None,
+                                        component_type=Type.CLIENT))
+        """
+        options_source = """
+            class OPTS:
+                GAME_TITLE = "Demo"
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            world_dir = Path(tmp) / "demo"
+            options_path = world_dir / "constants" / "options.py"
+            options_path.parent.mkdir(parents=True)
+            (world_dir / "__init__.py").write_text(
+                textwrap.dedent(source), encoding="utf-8"
+            )
+            options_path.write_text(textwrap.dedent(options_source), encoding="utf-8")
+            self.assertEqual(
+                shape_tree.parse_component_registrations(world_dir),
+                [{"name": "Demo Client", "type": "client"}],
+            )
+
+    def test_attribute_call_and_dotted_type(self) -> None:
+        # peggle/openrct2 shape: module-attribute Component and dotted Type.
+        source = """
+            import worlds.LauncherComponents as LauncherComponents
+
+            LauncherComponents.components.append(
+                LauncherComponents.Component(
+                    "Demo Client",
+                    func=None,
+                    component_type=LauncherComponents.Type.CLIENT,
+                )
+            )
         """
         self.assertEqual(
             self.parse(source),

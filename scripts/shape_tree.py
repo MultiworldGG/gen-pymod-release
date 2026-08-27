@@ -262,18 +262,94 @@ def _collect_type_aliases(tree: ast.AST) -> set[str]:
     return type_aliases
 
 
+def _str_assigns(node: ast.stmt):
+    """(name, value) pairs bound by a plain or annotated `NAME = "literal"`."""
+    if (isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)):
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                yield target.id, node.value.value
+    elif (isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)):
+        yield node.target.id, node.value.value
+
+
 def _module_str_constants(tree: ast.AST) -> dict[str, str]:
-    """NAME → value for `NAME = "literal"` assignments anywhere in the file, so
-    display names / descriptions passed by constant (e.g. CLIENT_NAME) resolve."""
+    """NAME → value for `NAME = "literal"` assignments anywhere in the file,
+    plus class-qualified `Cls.NAME` keys for class-body assignments, so display
+    names passed by constant (e.g. CLIENT_NAME, RAC3OPTION.GAME_TITLE) resolve."""
     out: dict[str, str] = {}
     for node in ast.walk(tree):
-        if (isinstance(node, ast.Assign)
-                and isinstance(node.value, ast.Constant)
-                and isinstance(node.value.value, str)):
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    out[target.id] = node.value.value
+        for name, value in _str_assigns(node):
+            out[name] = value
+        if isinstance(node, ast.ClassDef):
+            for stmt in node.body:
+                for name, value in _str_assigns(stmt):
+                    out[f"{node.name}.{name}"] = value
     return out
+
+
+def _imported_str_constants(tree: ast.AST, py_file: Path, world_dir: Path,
+                            cache: dict[Path, dict[str, str]]) -> dict[str, str]:
+    """Constants bound by importing from another module inside the world — one
+    hop, relative (`from .X import NAME`) or absolute into the world's own
+    package (`from worlds.<apworld>.X import NAME`) — so display names like
+    f"{GAME_NAME} Client" resolve when the constant lives in a sibling module.
+    Importing a class also binds its `Cls.NAME` qualified constants."""
+    out: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if node.level >= 1:
+            base = py_file.parent
+            for _ in range(node.level - 1):
+                base = base.parent
+            if node.module:
+                base = base.joinpath(*node.module.split("."))
+        else:
+            parts = (node.module or "").split(".")
+            if parts[:2] != ["worlds", world_dir.name]:
+                continue
+            base = world_dir.joinpath(*parts[2:])
+        for candidate in (base.with_suffix(".py"), base / "__init__.py"):
+            if not (candidate.is_file() and world_dir in candidate.parents):
+                continue
+            if candidate not in cache:
+                try:
+                    cache[candidate] = _module_str_constants(
+                        ast.parse(candidate.read_text(encoding="utf-8")))
+                except (SyntaxError, UnicodeDecodeError, OSError):
+                    cache[candidate] = {}
+            for alias in node.names:
+                if alias.name == "*":
+                    out.update(cache[candidate])
+                    continue
+                bound = alias.asname or alias.name
+                for key, value in cache[candidate].items():
+                    if key == alias.name:
+                        out[bound] = value
+                    elif key.startswith(f"{alias.name}."):
+                        out[bound + key[len(alias.name):]] = value
+            break
+    return out
+
+
+def _is_component_call(node: ast.Call) -> bool:
+    """Component(...) by bare name, or via a LauncherComponents module binding
+    (e.g. `LauncherComponents.Component(...)`)."""
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id == "Component"
+    if isinstance(func, ast.Attribute) and func.attr == "Component":
+        base = func.value
+        if isinstance(base, ast.Name):
+            return base.id == "LauncherComponents"
+        if isinstance(base, ast.Attribute):
+            return base.attr == "LauncherComponents"
+    return False
 
 
 def _component_declared_type(node: ast.Call, type_aliases: set[str]) -> tuple[Optional[str], bool]:
@@ -286,24 +362,50 @@ def _component_declared_type(node: ast.Call, type_aliases: set[str]) -> tuple[Op
         v = kw.value
         if isinstance(v, ast.Constant) and v.value is None:
             return None, False
-        if (isinstance(v, ast.Attribute) and isinstance(v.value, ast.Name)
-                and v.value.id in type_aliases):
-            return v.attr, True
+        if isinstance(v, ast.Attribute):
+            base = v.value
+            if isinstance(base, ast.Name) and base.id in type_aliases:
+                return v.attr, True
+            # Dotted access, e.g. `LauncherComponents.Type.CLIENT`.
+            if isinstance(base, ast.Attribute) and base.attr == "Type":
+                return v.attr, True
         return None, True
     return None, False
 
 
+def _resolve_str_expr(expr: ast.expr, str_constants: dict[str, str]) -> Optional[str]:
+    """Statically resolve a string expression: a literal, a module constant, or
+    an f-string whose parts are those (e.g. f"{GAME_NAME} Client")."""
+    if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+        return expr.value
+    if isinstance(expr, ast.Name):
+        return str_constants.get(expr.id)
+    if isinstance(expr, ast.Attribute) and isinstance(expr.value, ast.Name):
+        return str_constants.get(f"{expr.value.id}.{expr.attr}")
+    if isinstance(expr, ast.JoinedStr):
+        parts: list[str] = []
+        for value in expr.values:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                parts.append(value.value)
+                continue
+            if (isinstance(value, ast.FormattedValue) and value.format_spec is None
+                    and value.conversion == -1):
+                resolved = _resolve_str_expr(value.value, str_constants)
+                if resolved is not None:
+                    parts.append(resolved)
+                    continue
+            return None
+        return "".join(parts)
+    return None
+
+
 def _component_display_name(node: ast.Call, str_constants: dict[str, str]) -> Optional[str]:
-    """Constant display name from the display_name kwarg or first positional arg."""
+    """Statically resolvable display name from the display_name kwarg or first
+    positional arg."""
     exprs = [kw.value for kw in node.keywords if kw.arg == "display_name"]
     if not exprs and node.args:
         exprs = [node.args[0]]
-    for expr in exprs:
-        if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
-            return expr.value
-        if isinstance(expr, ast.Name):
-            return str_constants.get(expr.id)
-    return None
+    return _resolve_str_expr(exprs[0], str_constants) if exprs else None
 
 
 def parse_client_entry_points(world_dir: Path, apworld: str) -> list[tuple[str, str]]:
@@ -359,6 +461,7 @@ def parse_client_entry_points(world_dir: Path, apworld: str) -> list[tuple[str, 
     pkg_root = f"worlds.{apworld}"
     results: list[tuple[str, str]] = []
     seen_targets: set[tuple[str, str]] = set()
+    constants_cache: dict[Path, dict[str, str]] = {}
 
     for py_file in sorted(world_dir.rglob("*.py")):
         try:
@@ -371,7 +474,8 @@ def parse_client_entry_points(world_dir: Path, apworld: str) -> list[tuple[str, 
         is_init = py_file.name == "__init__.py"
 
         type_aliases = _collect_type_aliases(tree)
-        str_constants = _module_str_constants(tree)
+        str_constants = {**_imported_str_constants(tree, py_file, world_dir, constants_cache),
+                         **_module_str_constants(tree)}
 
         # local_name → (target_module, original_attr)
         local_to_target: dict[str, tuple[str, str]] = {}
@@ -395,9 +499,7 @@ def parse_client_entry_points(world_dir: Path, apworld: str) -> list[tuple[str, 
                         local_to_target[target.id] = (file_module, target.id)
 
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            if not (isinstance(node.func, ast.Name) and node.func.id == "Component"):
+            if not (isinstance(node, ast.Call) and _is_component_call(node)):
                 continue
 
             member, ctype_explicit = _component_declared_type(node, type_aliases)
@@ -492,6 +594,7 @@ def parse_component_registrations(world_dir: Path) -> list[dict[str, str]]:
     """
     entries: list[dict[str, str]] = []
     seen_names: set[str] = set()
+    constants_cache: dict[Path, dict[str, str]] = {}
     for py_file in sorted(world_dir.rglob("*.py")):
         try:
             tree = ast.parse(py_file.read_text(encoding="utf-8"))
@@ -499,10 +602,10 @@ def parse_component_registrations(world_dir: Path) -> list[dict[str, str]]:
             logging.warning("Skipping %s during component-registration scan: %s", py_file, exc)
             continue
         type_aliases = _collect_type_aliases(tree)
-        str_constants = _module_str_constants(tree)
+        str_constants = {**_imported_str_constants(tree, py_file, world_dir, constants_cache),
+                         **_module_str_constants(tree)}
         for node in ast.walk(tree):
-            if not (isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Name) and node.func.id == "Component"):
+            if not (isinstance(node, ast.Call) and _is_component_call(node)):
                 continue
             display_name = _component_display_name(node, str_constants)
             if display_name is None or display_name in seen_names:
@@ -521,12 +624,7 @@ def parse_component_registrations(world_dir: Path) -> list[dict[str, str]]:
             entry = {"name": display_name, "type": manifest_type}
             for kw in node.keywords:
                 if kw.arg == "description":
-                    if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
-                        description = kw.value.value
-                    elif isinstance(kw.value, ast.Name):
-                        description = str_constants.get(kw.value.id, "")
-                    else:
-                        description = ""
+                    description = _resolve_str_expr(kw.value, str_constants)
                     if description:
                         entry["description"] = description
             entries.append(entry)
