@@ -446,6 +446,7 @@ def build_one(apworld: str, index_entry: dict, prior_entry: Optional[dict] = Non
                 "world_version": world_version,
                 "source": source,
                 "dependencies": list(shape_info.get("dependencies", [])),
+                "components": shape_info.get("components"),
                 "uploaded_sha256": prior_entry.get("uploaded_sha256"),
             }
     finally:
@@ -491,16 +492,17 @@ def cmd_build(args: argparse.Namespace) -> int:
     for i, (apworld, entry) in enumerate(entries.items(), 1):
         prior = manifest.get(apworld, {})
         # Skip only when the prior entry was produced by the current shape_tree
-        # contract (i.e., has the `dependencies` field). Legacy entries built
-        # before shape_tree learned to read requirements.txt or auto-inject
-        # setuptools are unconditionally rebuilt so the user can blanket-fix
-        # broken wheels by re-running `build` (no flags). `--force` still
-        # overrides every cache check.
+        # contract (i.e., has the `dependencies` and `components` fields).
+        # Legacy entries built before shape_tree learned to read
+        # requirements.txt / mirror component registrations are unconditionally
+        # rebuilt so the user can blanket-fix stale wheels by re-running
+        # `build` (no flags). `--force` still overrides every cache check.
         if (
             prior
             and not prior.get("_skipped")
             and not args.force
             and "dependencies" in prior
+            and "components" in prior
         ):
             wheel_path = WHEELS_DIR / prior.get("wheel_filename", "")
             if wheel_path.is_file():
@@ -698,6 +700,11 @@ def cmd_rewrite_index(args: argparse.Namespace) -> int:
         )
         data["module_location"] = wheel_url
         data["world_version"] = entry["world_version"]
+        # Mirror the wheel's manifest components. When the build recorded none
+        # (older manifest entry, or a world with no components), leave any
+        # existing Index list alone rather than clobbering it.
+        if entry.get("components") is not None:
+            data["components"] = entry["components"]
         index_file.write_text(
             json.dumps(data, indent=4, ensure_ascii=False) + "\n", encoding="utf-8"
         )
