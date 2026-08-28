@@ -8,16 +8,16 @@ is overridable via a SEED_* environment variable (see the constants below), so t
 same script runs on a dev box (Windows defaults) and on a CI runner.
 
 Run phases independently so a re-run picks up where the last left off:
-  python seed_wheels.py build                  # Phase A — build all Index worlds + manifest
+  python seed_wheels.py build                  # Phase A - build all Index worlds + manifest
   python seed_wheels.py build --worlds a b c    #          build exactly these from source (no Index)
-  python seed_wheels.py upload                  # Phase B — create release + upload
-  python seed_wheels.py rewrite-index           # Phase C — rewrite Index manifests
-  python seed_wheels.py prune                   # Tidy — remove stale .whl files from staging
+  python seed_wheels.py upload                  # Phase B - create release + upload
+  python seed_wheels.py rewrite-index           # Phase C - rewrite Index manifests
+  python seed_wheels.py prune                   # Tidy - remove stale .whl files from staging
 
 State lives under SEED_STAGING (default <source>/tools/.seed-staging/):
-  wheels/                  — final .whl files, sha256-named for traceability
-  build_manifest.json      — per-world {wheel_filename, sha256, world_version, source}
-  failures/<apworld>.log   — full subprocess output for each build failure
+  wheels/                  - final .whl files, sha256-named for traceability
+  build_manifest.json      - per-world {wheel_filename, sha256, world_version, source}
+  failures/<apworld>.log   - full subprocess output for each build failure
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ STAGING = Path(os.environ.get("SEED_STAGING") or (MAIN_REPO / "tools" / ".seed-s
 WHEELS_DIR = STAGING / "wheels"
 # Per-world build-time source patches (e.g. dk64 ROM-path redirect). Each lives
 # at <SEED_OVERRIDES_DIR>/<apworld>/override.py. Applied transiently before
-# shape_tree.shape() and restored afterwards — see build_one. Defaults to the copy
+# shape_tree.shape() and restored afterwards - see build_one. Defaults to the copy
 # vendored alongside this script in gen-pymod-release.
 SEED_OVERRIDES_DIR = Path(
     os.environ.get("SEED_OVERRIDES_DIR") or (GEN_PYMOD / "seed_overrides")
@@ -81,7 +81,7 @@ import shape_tree  # type: ignore
 # shape_tree.shape() runs in THIS interpreter (only `python -m build` uses
 # VENV_PYTHON). Without tomli_w importable here, select_or_render_pyproject
 # silently drops the [project.entry-points."mwgg.client"] launch hook (and
-# version/author injection) — it only warns to stderr, yet still reports the
+# version/author injection) - it only warns to stderr, yet still reports the
 # entry points in its summary. The resulting wheels look fine but ship no hook,
 # so the launcher falls back to the world's __init__ wrapper (e.g. albw's
 # launch_subprocess), which double-spawns and opens a second GUI. Refuse to run
@@ -134,7 +134,7 @@ def scan_imports(world_dir: Path) -> set[str]:
 
     Only the first segment is kept (so `import bsdiff4.foo` yields `bsdiff4`).
     Relative imports are ignored. Files that fail to parse are skipped with a
-    warning — one un-parseable file shouldn't drop the whole world's deps.
+    warning - one un-parseable file shouldn't drop the whole world's deps.
     """
     found: set[str] = set()
     for py in world_dir.rglob("*.py"):
@@ -176,7 +176,7 @@ def _world_local_module_names(world_dir: Path) -> set[str]:
     Worlds routinely ship helper scripts (under ASM/, build_*.py, etc.) that use
     absolute imports like `from Colors import *` because they're meant to be run
     standalone from inside the world dir. These imports resolve to local files,
-    not PyPI packages — filter them out of third-party detection.
+    not PyPI packages - filter them out of third-party detection.
     """
     out: set[str] = set()
     for p in world_dir.rglob("*"):
@@ -589,7 +589,7 @@ def cmd_upload(args: argparse.Namespace) -> int:
 
     # Classify each wheel: fresh (asset missing on remote), stale (remote has
     # asset but our manifest's `sha256` doesn't match the previously-recorded
-    # `uploaded_sha256` — typically because the wheel was just rebuilt), or
+    # `uploaded_sha256` - typically because the wheel was just rebuilt), or
     # in-sync (skip).
     fresh: list[tuple[str, Path]] = []
     stale: list[tuple[str, Path]] = []
@@ -662,7 +662,7 @@ def cmd_upload(args: argparse.Namespace) -> int:
         return 1
     print(f"Verified: all {len(targets)} targeted wheels are on the release.")
 
-    # Publish now — created as a draft, so the `release: published` webhook (which
+    # Publish now - created as a draft, so the `release: published` webhook (which
     # wakes Oliver to open the Index PR) fires exactly ONCE, after every wheel is
     # attached and verified. Idempotent: --draft=false on an already-published
     # release is a no-op, so a re-run that left a draft behind still publishes it.
@@ -801,7 +801,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p_build = sub.add_parser("build", help="Phase A — build wheels locally")
+    p_build = sub.add_parser("build", help="Phase A - build wheels locally")
     p_build.add_argument("--only", nargs="*", help="Only build these Index apworlds")
     p_build.add_argument(
         "--worlds", nargs="*",
@@ -813,14 +813,14 @@ def main() -> int:
 
     p_upload = sub.add_parser(
         "upload",
-        help="Phase B — create release + upload wheels (auto-replaces wheels "
+        help="Phase B - create release + upload wheels (auto-replaces wheels "
              "whose local sha256 differs from the recorded uploaded_sha256)",
     )
     p_upload.add_argument("--only", nargs="*", help="Only consider these apworlds")
     p_upload.add_argument("--dry-run", action="store_true", help="Print what would happen, don't upload")
     p_upload.set_defaults(func=cmd_upload)
 
-    p_rewrite = sub.add_parser("rewrite-index", help="Phase C — rewrite Index manifests")
+    p_rewrite = sub.add_parser("rewrite-index", help="Phase C - rewrite Index manifests")
     p_rewrite.add_argument("--only", nargs="*", help="Only rewrite these apworlds")
     p_rewrite.add_argument("--dry-run", action="store_true", help="Rewrite files but don't validate")
     p_rewrite.set_defaults(func=cmd_rewrite_index)

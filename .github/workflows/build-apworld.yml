@@ -28,12 +28,12 @@ name: Build per-world .apworld
 #       with:
 #         game: "Your Game Name"
 #
-# IMPORTANT — `game` is the World.game *display name* (e.g. "My Cool Game"), not the
+# IMPORTANT - `game` is the World.game *display name* (e.g. "My Cool Game"), not the
 # folder name (e.g. "myclgm"). The Launcher's "Build APWorlds" component looks
 # up worlds by display name. Release publishing infers the apworld from
 # the release tag prefix; the `apworld` input is for manual dry-runs only.
 #
-# NOTE — by default this workflow checks out MultiworldGG/MultiworldGG (the
+# NOTE - by default this workflow checks out MultiworldGG/MultiworldGG (the
 # canonical monorepo) and overlays the caller's worlds/<apworld>/ onto it. If
 # your repo is itself an Archipelago fork (a full source tree with its own
 # Launcher.py at the root), set `from-fork: true` to build directly from your
@@ -44,7 +44,7 @@ on:
     inputs:
       game:
         description: |
-          The world's display name — the value of `World.game` in your Python
+          The world's display name - the value of `World.game` in your Python
           class (e.g. "My Cool Game"). This is passed directly to
           `Launcher.py "Build APWorlds" -- "<game>"`.
         required: true
@@ -59,7 +59,7 @@ on:
         default: "main"
       from-fork:
         description: |
-          Set to true when calling from a fork of Archipelago — i.e. the
+          Set to true when calling from a fork of Archipelago - i.e. the
           caller's repo is a full Archipelago source tree with its own
           Launcher.py at the root. The build runs entirely inside the
           caller's checkout and uses the fork's own Launcher.py; mwgg-ref

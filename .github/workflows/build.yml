@@ -169,7 +169,7 @@ jobs:
             --output-dir .orphan-tree \
             --caller-repo "${{ github.repository }}" \
             --source-ref "${{ steps.ref.outputs.ref }}"
-          # Read world_version from .shape_info.json — the single source of
+          # Read world_version from .shape_info.json - the single source of
           # truth shape_tree.py wrote. Avoids re-parsing archipelago.json.
           world_version=$(python -c "
           import json
@@ -222,7 +222,7 @@ jobs:
           # the consumer-side `module_location#sha256=<hex>` pin protects. If a
           # re-upload is needed (transient build failure, etc.), delete the
           # existing asset (`gh release delete-asset`) or recreate the release
-          # first — making every overwrite a deliberate human action.
+          # first - making every overwrite a deliberate human action.
 
           gh release upload "${RELEASE_TAG}" "$wheel" \
             --repo "${{ github.repository }}"

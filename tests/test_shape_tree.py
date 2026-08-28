@@ -420,7 +420,7 @@ class ParseComponentRegistrationsTests(unittest.TestCase):
         )
 
     def test_fstring_unresolvable_placeholder_skipped(self) -> None:
-        # rac3 shape: the placeholder is a class attribute — not resolvable.
+        # rac3 shape: the placeholder is a class attribute - not resolvable.
         source = """
             from worlds.LauncherComponents import Component, components, Type
             from .options import OPTION
@@ -575,7 +575,7 @@ class ShapeComponentsTests(unittest.TestCase):
             )
         self.assertEqual(copied_manifest["components"], hand)
         self.assertEqual(shape_info["components"], hand)
-        # "Demo Tracker" is registered but not declared — warn, never fail.
+        # "Demo Tracker" is registered but not declared - warn, never fail.
         self.assertTrue(any("Demo Tracker" in line for line in logs.output))
 
     def test_hand_authored_type_mismatch_warns(self) -> None:

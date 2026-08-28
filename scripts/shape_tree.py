@@ -8,7 +8,7 @@ Inputs:
 
 Outputs (under output_dir):
   pyproject.toml
-  .shape_info.json   {apworld, world_version, game} — single source of truth
+  .shape_info.json   {apworld, world_version, game} - single source of truth
                      for downstream workflow steps; avoids re-parsing
                      archipelago.json from build.yml.
   src/
@@ -16,7 +16,7 @@ Outputs (under output_dir):
       <apworld>/
         ...world source...
 
-If the caller's repo ships `worlds/<apworld>/pyproject.toml`, it is used as-is —
+If the caller's repo ships `worlds/<apworld>/pyproject.toml`, it is used as-is -
 with `version` and `authors` injected from `archipelago.json` only if those
 fields are absent (mirrors the `tools/build_wheels.py` pattern in the
 MultiworldGG monorepo).
@@ -141,11 +141,11 @@ def _extract_inner_target(
             return (f"{module}.{name}", expr.attr)
         return None
     if isinstance(expr, ast.Call):
-        # `launch(*args)` — the callee itself is the inner client.
+        # `launch(*args)` - the callee itself is the inner client.
         from_callee = _extract_inner_target(expr.func, body_imports)
         if from_callee is not None:
             return from_callee
-        # `partial(launch, *args)` — the first resolvable positional is the client.
+        # `partial(launch, *args)` - the first resolvable positional is the client.
         for arg in expr.args:
             resolved = _extract_inner_target(arg, body_imports)
             if resolved is not None:
@@ -181,7 +181,7 @@ def _trace_wrapper_to_inner_target(
     handles `mod.Y`, `Y(*args)`, and `partial(Y, *args)` shapes.
 
     Returns None when the wrapper is not a recognized `import + dispatch(Y)`
-    shape — in that case the caller should skip emission and warn.
+    shape - in that case the caller should skip emission and warn.
     """
     body_imports: dict[str, tuple[str, str]] = {}
     for stmt in func_def.body:
@@ -294,9 +294,9 @@ def _module_str_constants(tree: ast.AST) -> dict[str, str]:
 
 def _imported_str_constants(tree: ast.AST, py_file: Path, world_dir: Path,
                             cache: dict[Path, dict[str, str]]) -> dict[str, str]:
-    """Constants bound by importing from another module inside the world — one
+    """Constants bound by importing from another module inside the world - one
     hop, relative (`from .X import NAME`) or absolute into the world's own
-    package (`from worlds.<apworld>.X import NAME`) — so display names like
+    package (`from worlds.<apworld>.X import NAME`) - so display names like
     f"{GAME_NAME} Client" resolve when the constant lives in a sibling module.
     Importing a class also binds its `Cls.NAME` qualified constants."""
     out: dict[str, str] = {}
@@ -420,7 +420,7 @@ def parse_client_entry_points(world_dir: Path, apworld: str) -> list[tuple[str, 
     Returns a deterministic list of `(entry_point_key, entry_point_value)`
     suitable for `[project.entry-points."mwgg.client"]`.
 
-    This is intentionally a textual / AST walk — we never import the world's
+    This is intentionally a textual / AST walk - we never import the world's
     own code, which would require the whole AP runtime + all transitive
     dependencies to be importable from the build sandbox. The companion
     function `parse_client_function` in `APContainer.py` is the runtime
@@ -443,7 +443,7 @@ def parse_client_entry_points(world_dir: Path, apworld: str) -> list[tuple[str, 
 
     If the apworld name is not a valid Python identifier (e.g. `2048`,
     `civ_6` is fine, `2048` is not because it starts with a digit), entry
-    points are silently skipped — `setuptools` rejects entry-point targets
+    points are silently skipped - `setuptools` rejects entry-point targets
     whose module path has a digit-led segment with `must be
     python-entrypoint-reference`. Such worlds are still importable via
     `importlib.import_module("worlds.2048")` at runtime; the launcher
@@ -529,7 +529,7 @@ def parse_client_entry_points(world_dir: Path, apworld: str) -> list[tuple[str, 
             # client module instead.
             if target_module == pkg_root:
                 # Walk the whole tree (not just tree.body) so wrappers nested
-                # inside `if`/`try` blocks are found — e.g. dk64's
+                # inside `if`/`try` blocks are found - e.g. dk64's
                 # `if baseclasses_loaded:` and stardew_valley's tracker guards.
                 wrapper_def = next(
                     (n for n in ast.walk(tree)
@@ -546,7 +546,7 @@ def parse_client_entry_points(world_dir: Path, apworld: str) -> list[tuple[str, 
                         "%s: Type.CLIENT Component(func=%s) resolves to %s "
                         "(the world's __init__), and the wrapper body isn't a "
                         "simple `from .X import Y; launch(Y, ...)` shape. "
-                        "Skipping entry-point emission — pointing it at "
+                        "Skipping entry-point emission - pointing it at "
                         "__init__ would defeat lazy client loading. Move %s "
                         "into a sibling module (e.g. Register.py / "
                         "client/component.py) or pin a custom entry point in "
@@ -709,7 +709,7 @@ _PIP_OPTION_PREFIXES = ("--hash=", "--global-option=", "--config-settings=",
 def _canonical_dist_name(spec: str) -> str:
     """Extract and PEP 503-normalize the distribution name from a PEP 508 spec.
 
-    Stdlib only — does not pull in `packaging`. Handles `pkg`, `pkg[extra]`,
+    Stdlib only - does not pull in `packaging`. Handles `pkg`, `pkg[extra]`,
     `pkg==1`, `pkg>=1,<2`, `pkg @ url`, `pkg ; marker`. Returns "" if the
     spec doesn't start with an identifier.
     """
@@ -733,7 +733,7 @@ def parse_requirements_txt(path: Path) -> list[str]:
     flags). Logs `::warning::` for the directive flags an author might
     reasonably expect to work (`-r`, `-c`, `-e`) so it's not silently dropped.
 
-    Stdlib only — does not import `pip` or `packaging`. Each returned string
+    Stdlib only - does not import `pip` or `packaging`. Each returned string
     is meant to be dropped directly into pyproject `[project].dependencies`,
     which setuptools parses per PEP 621 (PEP 508 grammar including direct
     references like `pkg @ git+https://…` and env markers like
@@ -747,7 +747,7 @@ def parse_requirements_txt(path: Path) -> list[str]:
     for raw_line in text.splitlines():
         # Per pip's parser, `#` starts a comment only when preceded by
         # whitespace (or at column 0). A bare `#` mid-token is a URL fragment
-        # — e.g. `pkg @ git+https://host/repo@sha#egg=name`.
+        # - e.g. `pkg @ git+https://host/repo@sha#egg=name`.
         line = re.split(r"(?:^|\s)#", raw_line, maxsplit=1)[0].strip()
         if not line:
             continue
@@ -755,7 +755,7 @@ def parse_requirements_txt(path: Path) -> list[str]:
         if first_token in _PIP_DIRECTIVE_FLAGS_SKIP:
             if first_token in _PIP_DIRECTIVE_FLAGS_WARN:
                 logging.warning(
-                    "::warning::requirements.txt %s: skipping pip directive %r — "
+                    "::warning::requirements.txt %s: skipping pip directive %r - "
                     "pyproject [project].dependencies only accepts PEP 508 specs.",
                     path, first_token,
                 )
@@ -776,7 +776,7 @@ def parse_requirements_txt(path: Path) -> list[str]:
 def scan_for_pkg_resources(world_dir: Path) -> bool:
     """True if any `.py` under `world_dir` imports `pkg_resources`.
 
-    `pkg_resources` ships with setuptools but is not in the stdlib — worlds
+    `pkg_resources` ships with setuptools but is not in the stdlib - worlds
     that import it need `setuptools` declared as a runtime dep or they
     ImportError at module load. AST-based to avoid false positives from
     comments / strings.
@@ -816,7 +816,7 @@ def select_or_render_pyproject(
     Fallback: render the bundled template.
 
     In both paths, statically-discovered `mwgg.client` entry points are
-    injected only when the caller hasn't already declared its own — the
+    injected only when the caller hasn't already declared its own - the
     caller's declaration always wins.
 
     `requirements_deps` are PEP 508 specs sourced from
@@ -824,7 +824,7 @@ def select_or_render_pyproject(
     when the world imports `pkg_resources`). They land in
     `[project].dependencies`. If the caller's pyproject already declares
     `[project].dependencies`, the caller wins and we emit a `::warning::`
-    that requirements.txt was ignored — matches the precedence policy used
+    that requirements.txt was ignored - matches the precedence policy used
     for `version`/`authors`.
     """
     caller_pyproject = caller_world_dir / "pyproject.toml"
@@ -838,7 +838,7 @@ def select_or_render_pyproject(
         project = data.setdefault("project", {})
         entry_points = project.setdefault("entry-points", {})
         if "mwgg.client" in entry_points and entry_points["mwgg.client"]:
-            return  # caller already declared their own — don't second-guess
+            return  # caller already declared their own - don't second-guess
         entry_points["mwgg.client"] = {k: v for k, v in client_entry_points}
 
     def _inject_dependencies(data: dict, *, caller_has_pyproject: bool) -> None:
@@ -865,14 +865,14 @@ def select_or_render_pyproject(
             project["version"] = world_version
         if not project.get("authors") and authors:
             project["authors"] = [{"name": a} for a in authors]
-        # Always overwrite description from archipelago.json's `game` field — keeps
+        # Always overwrite description from archipelago.json's `game` field - keeps
         # the orphan branch's project.description in sync.
         project["description"] = f"MultiWorld: {game_name}"
         _inject_entry_points(data)
         _inject_dependencies(data, caller_has_pyproject=True)
         if _HAS_TOMLI_W:
             return tomli_w.dumps(data)
-        # No tomli_w available — emit the original text unchanged but warn.
+        # No tomli_w available - emit the original text unchanged but warn.
         print(
             "::warning::tomli_w not available; emitting caller's pyproject.toml verbatim "
             "(version/authors/dependencies injection skipped). pip install tomli_w in the workflow.",
@@ -946,7 +946,7 @@ def shape(
     # Populate the manifest `components` mirror the launcher scans import-free.
     # A hand-authored list in the caller's archipelago.json is authoritative and
     # ships unchanged (validated warn-only); otherwise the statically derived
-    # list is written into the *copied* manifest — the caller's source file is
+    # list is written into the *copied* manifest - the caller's source file is
     # never touched.
     derived_components = parse_component_registrations(copied_world_dir)
     declared_components = archipelago_json.get("components")
@@ -992,7 +992,7 @@ def shape(
     )
     (output_dir / "pyproject.toml").write_text(pyproject_text, encoding="utf-8")
 
-    # Drop pyproject.toml from inside src/worlds/<apworld>/ — the root one is canonical.
+    # Drop pyproject.toml from inside src/worlds/<apworld>/ - the root one is canonical.
     nested_pyproject = output_dir / "src" / "worlds" / apworld / "pyproject.toml"
     if nested_pyproject.is_file():
         nested_pyproject.unlink()
@@ -1000,12 +1000,12 @@ def shape(
     # Mirror tools/build_wheels.py in the monorepo: a per-world MANIFEST.in is
     # required so setuptools picks up every non-Python file and every nested
     # subpackage under src/worlds/<apworld>/. Without this, the wheel ships only
-    # the top-level *.py files — data/, docs/, sub-packages, archipelago.json,
+    # the top-level *.py files - data/, docs/, sub-packages, archipelago.json,
     # templates, images, etc. are all silently dropped.
     manifest_text = (
         "global-exclude *\n"
         f"graft src/worlds/{apworld}\n"
-        # NOTE: pattern is *.py[co] (not *.py[cod]) — the bracket char-class
+        # NOTE: pattern is *.py[co] (not *.py[cod]) - the bracket char-class
         # matches any single listed letter, so [cod] would also match `.pyd`,
         # i.e. Windows native extensions. We want to exclude .pyc/.pyo
         # bytecode but ship .pyd extensions.

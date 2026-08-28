@@ -5,7 +5,7 @@ path in four places (the generate-stage gate, ``Patcher.load_base_rom``,
 ``LocalROM`` and the ``ApplyRandomizer`` xdelta step) and otherwise pops a Tk file
 picker. Neither works on a headless webhost. This override redirects every read
 through a new ``_ap_rom.resolve_rom_path()`` that resolves an absolute path from
-``host.yaml`` (``dk64_options.rom_file``), so the ROM can live anywhere — no cwd
+``host.yaml`` (``dk64_options.rom_file``), so the ROM can live anywhere - no cwd
 dependence, no GUI prompt.
 
 ``worlds/dk64`` is auto-vendored from 2dos/DK64-Randomizer-Dev, so this is applied
@@ -13,10 +13,10 @@ transiently at wheel-build time by tools/seed_wheels.py (see ``_load_override`` 
 ``build_one``) and the source tree is restored afterwards.
 
 Contract used by seed_wheels.py:
-  TOUCHES        — files this override reads or creates; snapshotted before
+  TOUCHES        - files this override reads or creates; snapshotted before
                    apply() and restored (or deleted) afterwards.
   apply(world_dir) -> list[str]
-                 — performs the edits, creates _ap_rom.py, returns human-readable
+                 - performs the edits, creates _ap_rom.py, returns human-readable
                    change descriptions. Raises if any anchor is missing or
                    ambiguous, so upstream drift can never ship a half-patched wheel.
 """
@@ -102,7 +102,7 @@ _EDITS = [
         f"            {_IMPORT}\n"
         "            rom_file = resolve_rom_path()\n",
     ),
-    # 3. The picker fallback copies to rom_file, now an absolute path — ensure its
+    # 3. The picker fallback copies to rom_file, now an absolute path - ensure its
     #    parent exists.
     (
         "__init__.py",
@@ -162,7 +162,7 @@ def apply(world_dir: Path) -> list[str]:
         for old, new in edits:
             text = _replace_once(text, old, new, where=rel)
         # newline="" so we don't translate the source's LF endings to CRLF on
-        # Windows — a flip would dirty the (LF) vendored tree on restore.
+        # Windows - a flip would dirty the (LF) vendored tree on restore.
         with open(path, "w", encoding="utf-8", newline="") as fh:
             fh.write(text)
         changes.append(f"patched {rel} ({len(edits)} edit(s))")

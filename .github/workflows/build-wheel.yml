@@ -12,7 +12,7 @@ name: Build python module whl of APWorld
 #       with: { version: ${{ inputs.version }} }
 #
 # Trigger model (distinct from build.yml / build-apworld.yml):
-#   This workflow shapes its own release — it creates the tag, creates the
+#   This workflow shapes its own release - it creates the tag, creates the
 #   GitHub Release, and uploads the wheel from the given version. Caller
 #   workflow_dispatch is the normal trigger here, not a power-user path.
 #   It is NOT the APWorld release flow; APWorld repos should use the

@@ -1,6 +1,6 @@
 # MultiworldGG/gen-pymod-release
 
-> **Looking for a step-by-step author guide?** See the [MultiworldGG-Index docs site](https://multiworldgg.github.io/MultiworldGG-Index/) — "I want the easiest setup" or "I want to write my own `pyproject.toml`".
+> **Looking for a step-by-step author guide?** See the [MultiworldGG-Index docs site](https://multiworldgg.github.io/MultiworldGG-Index/) - "I want the easiest setup" or "I want to write my own `pyproject.toml`".
 >
 > This README is the workflow reference (inputs, outputs, version-pinning rules).
 
@@ -17,7 +17,7 @@ The matching `MultiworldGG-Index` PR is opened separately by the
 published. Karen's review checks fire automatically once that PR is open. None
 of that lives in this action.
 
-## Quick start — per-world repo
+## Quick start - per-world repo
 
 In your per-world repo, create `.github/workflows/make_pyproject.yml`. The
 workflow can still respond to published releases, but the recommended path is
@@ -72,14 +72,14 @@ dispatches `make_pyproject.yml`, waits for it, and verifies that the draft has
 exactly one wheel asset. Review the attached assets in GitHub and click
 **Publish**. Wheel uploads intentionally do not use `--clobber`.
 
-## Quick start — pure-Python client repo (flat layout)
+## Quick start - pure-Python client repo (flat layout)
 
 For repos that ship a single pip-installable Python package at the repo root
-(a `pyproject.toml` plus a top-level package directory — no `worlds/<apworld>/`
+(a `pyproject.toml` plus a top-level package directory - no `worlds/<apworld>/`
 shape), use the sibling `build-wheel.yml` workflow. It rewrites
 `pyproject.toml:[project].version` in the runner to the input version, builds
 the wheel, tags `v<version>`, creates a GitHub Release, and uploads the wheel
-as an asset. The committed `pyproject.toml` is **not** modified — the workflow
+as an asset. The committed `pyproject.toml` is **not** modified - the workflow
 input is the single source of truth.
 
 In your client repo, create `.github/workflows/release.yml`:
@@ -114,7 +114,7 @@ Inputs accepted by `build-wheel.yml`:
 
 | name | required | default | notes |
 |---|---|---|---|
-| `version` | yes | — | Becomes both the tag (`v<version>`) and the wheel's metadata version. |
+| `version` | yes | - | Becomes both the tag (`v<version>`) and the wheel's metadata version. |
 | `source-ref` | | `github.sha` | Caller-repo ref to build from. |
 | `python-version` | | `"3.13"` | Build interpreter. Pure-Python wheels are `py3-none-any` regardless. |
 | `dry-run` | | `false` | Build the wheel, skip tag/release/upload. |
@@ -195,7 +195,7 @@ directly into `custom_worlds/`. Drop either job if you do not need it.
 
 | name | required | default | notes |
 |---|---|---|---|
-| `game` | **yes** | — | The world's display name — the value of `World.game` in your Python class (e.g. `"My Cool Game"`). Must match exactly; the Launcher looks worlds up by display name. |
+| `game` | **yes** | - | The world's display name - the value of `World.game` in your Python class (e.g. `"My Cool Game"`). Must match exactly; the Launcher looks worlds up by display name. |
 | `mwgg-ref` | | `"main"` | Ref of `MultiworldGG/MultiworldGG` to check out as the Launcher host. Pin to a release tag (e.g. `"0.6.1"`) for reproducibility. Always resolves against the canonical monorepo, not your fork. Ignored when `from-fork: true`. |
 | `from-fork` | | `false` | Set to `true` when calling from an Archipelago fork (a full source tree with its own `Launcher.py`). Skips the canonical MWGG checkout and builds from the caller's own tree; `mwgg-ref` is ignored. |
 | `release-tag` | | `""` | Existing GitHub Release tag to upload to. Required for pre-publication draft uploads from caller `workflow_dispatch`; release events default from `github.event.release.tag_name`. |
@@ -208,7 +208,7 @@ directly into `custom_worlds/`. Drop either job if you do not need it.
 
 A single `<apworld>.apworld` file attached to the GitHub release as an asset.
 The apworld is inferred from the release tag prefix (`<apworld>-<version>`).
-The upload uses `--clobber` — unlike the wheel, the `.apworld` is not pinned
+The upload uses `--clobber` - unlike the wheel, the `.apworld` is not pinned
 by a SHA256 fragment on the Index side, so overwriting on workflow re-runs is
 safe.
 
@@ -222,7 +222,7 @@ Your world's source must live at `worlds/<apworld>/` in your repo.
 `archipelago.json` is required at `worlds/<apworld>/archipelago.json` and must
 include `world_version`.
 
-If you ship `worlds/<apworld>/pyproject.toml`, it is used as-is — `version`,
+If you ship `worlds/<apworld>/pyproject.toml`, it is used as-is - `version`,
 `authors`, and `description` are injected from `archipelago.json` only when
 missing. Otherwise a minimal default is generated.
 
@@ -230,7 +230,7 @@ missing. Otherwise a minimal default is generated.
 
 The `archipelago.json` inside the shaped wheel carries a `components` key: the
 list the MultiworldGG launcher renders without importing world code. Each entry
-mirrors one of the world's `LauncherComponents.Component` registrations —
+mirrors one of the world's `LauncherComponents.Component` registrations -
 `{"name": <display_name>, "type": "client"|"tool"|"adjuster"}` plus an optional
 `"description"`; `MISC` and `HIDDEN` components are never declared.
 
@@ -238,7 +238,7 @@ If your source `archipelago.json` hand-authors a `components` list, it is
 authoritative and ships unchanged; the build only warns when it disagrees with
 the registrations found by static scan. Without one, the list is derived
 automatically from the world source and written into the wheel's copy of the
-manifest — your source file is not modified.
+manifest - your source file is not modified.
 
 ## Inputs
 
@@ -264,12 +264,12 @@ install it directly: `pip install <url>`.
 ## Versioning constraint
 
 The release tag is the immutability boundary. GitHub does not silently allow
-re-publishing a release tag at a different SHA — you must manually delete and
+re-publishing a release tag at a different SHA - you must manually delete and
 re-create the release to do so.
 
 The action uploads without `--clobber`: re-running the workflow on a release
 that already has a `.whl` asset will fail (`gh release upload` refuses to
-overwrite). This is deliberate — the asset bytes are pinned by a
+overwrite). This is deliberate - the asset bytes are pinned by a
 `#sha256=<hex>` fragment on the consumer side once Oliver opens the Index PR,
 and a silent overwrite would invalidate that pin without warning. To fix a
 transient build failure on an existing release, either
