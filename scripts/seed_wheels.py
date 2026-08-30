@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import dataclasses
 import functools
 import hashlib
 import importlib.util
@@ -36,7 +37,7 @@ import sys
 import time
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 # Repo locations and release destination. Every value is overridable via a SEED_*
 # env var so the same script runs on a dev box (Windows defaults below) and on a
@@ -64,6 +65,10 @@ SEED_OVERRIDES_DIR = Path(
 )
 FAILURES_DIR = STAGING / "failures"
 MANIFEST_PATH = STAGING / "build_manifest.json"
+# Bump whenever the dependency-scan/plan logic changes shape in a way that
+# should force a rebuild of every cached manifest entry - see cmd_build's
+# skip check.
+DEPS_REV = 2
 
 RELEASE_TAG = os.environ.get("SEED_RELEASE_TAG") or f"worlds-wheels-{time.strftime('%Y-%m-%d')}"
 RELEASE_REPO = os.environ.get("SEED_RELEASE_REPO") or "MultiworldGG/MultiworldGG-Beta"
@@ -77,21 +82,6 @@ RELEASE_NOTES = os.environ.get("SEED_RELEASE_NOTES") or (
 
 sys.path.insert(0, str(GEN_PYMOD / "scripts"))
 import shape_tree  # type: ignore
-
-# shape_tree.shape() runs in THIS interpreter (only `python -m build` uses
-# VENV_PYTHON). Without tomli_w importable here, select_or_render_pyproject
-# silently drops the [project.entry-points."mwgg.client"] launch hook (and
-# version/author injection) - it only warns to stderr, yet still reports the
-# entry points in its summary. The resulting wheels look fine but ship no hook,
-# so the launcher falls back to the world's __init__ wrapper (e.g. albw's
-# launch_subprocess), which double-spawns and opens a second GUI. Refuse to run
-# rather than emit silently-broken wheels; .seed-venv ships tomli_w.
-if not shape_tree._HAS_TOMLI_W:
-    sys.exit(
-        f"tomli_w is not importable in {sys.executable}, so shape_tree would "
-        "silently drop the mwgg.client launch hook from every client wheel. "
-        f"Re-run with the seed venv: {VENV_PYTHON}"
-    )
 
 
 # Fallback set of project-internal modules used if the MAIN_REPO scan misses
@@ -126,7 +116,11 @@ IMPORT_NAME_MAP = {
     "pkg_resources": "setuptools",
     "OpenSSL": "pyOpenSSL",
     "Crypto": "pycryptodome",
+    "attr": "attrs",
 }
+
+# Imports that only ever show up from dev/build tooling, never a runtime dep.
+DEV_TOOL_IMPORTS = frozenset({"pytest", "PyInstaller"})
 
 
 def scan_imports(world_dir: Path) -> set[str]:
@@ -200,7 +194,7 @@ def detect_third_party_deps(
     first_party = _project_internal_modules()
     out: set[str] = set()
     for name in raw:
-        if not name:
+        if not name or name.startswith("__"):
             continue
         if name in sys.stdlib_module_names:
             continue
@@ -212,41 +206,163 @@ def detect_third_party_deps(
             continue
         if name in ignore:
             continue
+        if name in DEV_TOOL_IMPORTS:
+            continue
         out.add(IMPORT_NAME_MAP.get(name, name))
     return sorted(out)
 
 
-def merge_requirements(original: Optional[str], detected: list[str]) -> Optional[str]:
-    """Return new requirements.txt text, or None if no change is needed.
+def scan_coverage_gaps(detected: list[str], authored_text: str) -> None:
+    """Print `[deps][info]` notes for detected imports the authored
+    requirements.txt doesn't obviously cover.
 
-    Existing lines are preserved verbatim (including pins, comments, blanks).
-    Detected deps whose canonical name already appears are skipped.
+    Authored requirements.txt is authoritative and is never modified - a
+    canonical-name mismatch (e.g. import `factorio_rcon` vs. dist
+    `factorio-rcon-py`) is common and expected, so this only prints; nothing
+    here is ever used to change the file.
     """
-    lines = original.splitlines() if original else []
     have: set[str] = set()
-    for line in lines:
+    for line in authored_text.splitlines():
         stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
+        if not stripped or stripped.startswith("#") or stripped.startswith("-"):
             continue
-        if stripped.startswith("-"):
-            continue  # pip directives; leave alone
         canon = _dist_name(stripped)
         if canon:
             have.add(canon)
+    for dep in detected:
+        if _canonical(dep) not in have:
+            print(
+                f"[deps][info] {dep}: not obviously covered by name in the authored "
+                "requirements.txt (cannot verify - distribution names often differ "
+                "from import names, so this is not acted on)"
+            )
 
-    additions = [d for d in detected if _canonical(d) not in have]
-    if not additions:
+
+@dataclasses.dataclass(frozen=True)
+class DepPlan:
+    additions: list[str]
+    dropped: list[str]
+
+
+@functools.lru_cache(maxsize=1)
+def _host_provided_dists() -> frozenset[str]:
+    """Canonical dist names already on the frozen client's requirements.txt.
+
+    A world's scanned imports that overlap this baseline don't need to ship
+    in the world's own wheel Requires-Dist - the host process already
+    provides them. Reads MAIN_REPO/requirements.txt plus an optional extra
+    file from SEED_HOST_REQUIREMENTS (e.g. GUI-only deps not on the base
+    client).
+    """
+    paths = [MAIN_REPO / "requirements.txt"]
+    extra = os.environ.get("SEED_HOST_REQUIREMENTS")
+    if extra:
+        paths.append(Path(extra))
+    names: set[str] = set()
+    for path in paths:
+        if not path.is_file():
+            continue
+        for spec in shape_tree.parse_requirements_txt(path):
+            canon = shape_tree._canonical_dist_name(spec)
+            if canon:
+                names.add(canon)
+    return frozenset(names)
+
+
+_RESOLVE_CACHE: dict[str, bool] = {}
+
+
+def _uv_dry_run_install(target: str, uv: str) -> Optional[subprocess.CompletedProcess]:
+    """Run `uv pip install --dry-run` against `target`; None on timeout."""
+    try:
+        return subprocess.run(
+            [uv, "pip", "install", "--dry-run", "--no-config", target],
+            capture_output=True, text=True, timeout=120,
+        )
+    except subprocess.TimeoutExpired:
         return None
 
-    new_lines = list(lines)
-    if new_lines and new_lines[-1].strip():
-        new_lines.append("")
-    if original is None:
-        new_lines.append("# auto-detected by seed_wheels.py from source imports")
-    else:
-        new_lines.append("# appended by seed_wheels.py from source imports")
-    new_lines.extend(additions)
-    return "\n".join(new_lines) + "\n"
+
+def _dep_resolves(spec: str) -> Optional[bool]:
+    """Whether `spec` resolves via `uv pip install --dry-run`.
+
+    Returns None (unverifiable) when uv isn't on PATH. Cached per spec for
+    the life of the process.
+    """
+    if spec in _RESOLVE_CACHE:
+        return _RESOLVE_CACHE[spec]
+    uv = shutil.which("uv")
+    if uv is None:
+        return None
+    result = _uv_dry_run_install(spec, uv)
+    resolved = result is not None and result.returncode == 0
+    _RESOLVE_CACHE[spec] = resolved
+    return resolved
+
+
+def plan_scan_additions(
+    apworld: str,
+    detected: list[str],
+    *,
+    host_provided: Optional[frozenset[str]] = None,
+    resolver: Callable[[str], Optional[bool]] = _dep_resolves,
+    require_resolve_check: Optional[bool] = None,
+) -> DepPlan:
+    """Filter source-scanned imports down to real, resolvable additions for a
+    world with no authored requirements.txt.
+
+    Order: drop anything the host baseline already provides, then drop
+    anything `resolver` reports as unresolvable (recorded in `.dropped`).
+    `resolver` returning None means it couldn't verify (uv missing) - the dep
+    still ships, with a warning, unless `require_resolve_check` (or
+    SEED_REQUIRE_RESOLVE_CHECK=1) demands proof before shipping.
+    """
+    if host_provided is None:
+        host_provided = _host_provided_dists()
+    if require_resolve_check is None:
+        require_resolve_check = os.environ.get("SEED_REQUIRE_RESOLVE_CHECK") == "1"
+
+    additions: list[str] = []
+    dropped: list[str] = []
+    for dep in detected:
+        if _canonical(dep) in host_provided:
+            continue
+        resolved = resolver(dep)
+        if resolved is False:
+            print(
+                f"[deps][warn] {apworld}: dropping unresolvable dep {dep!r} detected "
+                f"from source imports - it does not resolve via uv (not on PyPI/a "
+                f"reachable index, or the check timed out). If this is a real "
+                f"dependency under a different distribution name, add "
+                f"worlds/{apworld}/requirements.txt with the correct name."
+            )
+            dropped.append(dep)
+            continue
+        if resolved is None:
+            if require_resolve_check:
+                sys.exit(
+                    f"{apworld}: cannot verify auto-detected dep {dep!r} resolves "
+                    "(uv not found) and SEED_REQUIRE_RESOLVE_CHECK=1 requires proof "
+                    "before shipping a generated requirements.txt."
+                )
+            print(
+                f"[deps][warn] {apworld}: shipping unverified dep {dep!r} - uv not "
+                "found, cannot confirm it resolves on PyPI."
+            )
+        additions.append(dep)
+    return DepPlan(additions=sorted(additions), dropped=sorted(dropped))
+
+
+def render_generated_requirements(additions: list[str]) -> Optional[str]:
+    """Return generated requirements.txt text, or None if there's nothing to add.
+
+    Only used for worlds with no authored requirements.txt - callers should
+    skip writing/staging any file when this returns None.
+    """
+    if not additions:
+        return None
+    lines = ["# auto-detected by seed_wheels.py from source imports", *additions]
+    return "\n".join(lines) + "\n"
 
 
 def load_manifest() -> dict:
@@ -340,28 +456,24 @@ def build_one(apworld: str, index_entry: dict, prior_entry: Optional[dict] = Non
     override = _load_override(apworld)
     ignore_imports = frozenset(getattr(override, "IGNORE_IMPORTS", []) if override else [])
 
-    # Transient requirements.txt: scan world sources for third-party imports and
-    # merge them in so shape_tree's existing parse_requirements_txt() picks them
-    # up. Restored (or deleted) in the finally below so the source tree stays clean.
+    # Authored worlds/<apworld>/requirements.txt is authoritative and is never
+    # modified. Worlds without one get a transient generated file from the
+    # import scan (deleted in the finally below so the source tree stays clean).
     requirements_path = world_dir / "requirements.txt"
-    original_requirements: Optional[bytes] = (
-        requirements_path.read_bytes() if requirements_path.is_file() else None
-    )
+    has_authored_requirements = requirements_path.is_file()
     detected_deps = detect_third_party_deps(apworld, world_dir, ignore=ignore_imports)
-    original_text = (
-        original_requirements.decode("utf-8") if original_requirements is not None else None
-    )
-    merged_requirements = merge_requirements(original_text, detected_deps)
-    if merged_requirements is not None:
-        requirements_path.write_text(merged_requirements, encoding="utf-8")
-        added = [
-            d for d in detected_deps
-            if _canonical(d) not in {
-                _dist_name(l) for l in (original_text or "").splitlines() if l.strip()
-            }
-        ]
-        if added:
-            print(f"[deps] {apworld}: added {', '.join(added)} from import scan")
+    dropped_deps: list[str] = []
+    generated_requirements_written = False
+    if has_authored_requirements:
+        scan_coverage_gaps(detected_deps, requirements_path.read_text(encoding="utf-8"))
+    else:
+        plan = plan_scan_additions(apworld, detected_deps)
+        dropped_deps = plan.dropped
+        generated_text = render_generated_requirements(plan.additions)
+        if generated_text is not None:
+            requirements_path.write_text(generated_text, encoding="utf-8")
+            generated_requirements_written = True
+            print(f"[deps] {apworld}: generated requirements.txt with {', '.join(plan.additions)} from import scan")
 
     # `override` was loaded above (for IGNORE_IMPORTS). Apply it transiently here
     # so the auto-vendored source tree is restored in the finally below.
@@ -448,6 +560,8 @@ def build_one(apworld: str, index_entry: dict, prior_entry: Optional[dict] = Non
                 "dependencies": list(shape_info.get("dependencies", [])),
                 "components": shape_info.get("components"),
                 "uploaded_sha256": prior_entry.get("uploaded_sha256"),
+                "deps_rev": DEPS_REV,
+                "dropped_deps": dropped_deps,
             }
     finally:
         if original_bytes is None:
@@ -455,12 +569,8 @@ def build_one(apworld: str, index_entry: dict, prior_entry: Optional[dict] = Non
                 archipelago_json_path.unlink()
         elif needs_write:
             archipelago_json_path.write_bytes(original_bytes)
-        if merged_requirements is not None:
-            if original_requirements is None:
-                if requirements_path.is_file():
-                    requirements_path.unlink()
-            else:
-                requirements_path.write_bytes(original_requirements)
+        if generated_requirements_written and requirements_path.is_file():
+            requirements_path.unlink()
         for rel, original in override_backup.items():
             p = world_dir / rel
             if original is None:
@@ -470,7 +580,47 @@ def build_one(apworld: str, index_entry: dict, prior_entry: Optional[dict] = Non
                 p.write_bytes(original)
 
 
+def _build_is_cached(prior: dict, force: bool) -> bool:
+    """Whether `prior`'s wheel can be reused as-is for this cmd_build run.
+
+    Legacy entries (missing `dependencies`/`components`) or entries built
+    under a stale DEPS_REV are unconditionally rebuilt so the user can
+    blanket-fix stale wheels by re-running `build` with no flags. `force`
+    still overrides every cache check.
+    """
+    if not prior or prior.get("_skipped") or force:
+        return False
+    if "dependencies" not in prior or "components" not in prior:
+        return False
+    if prior.get("deps_rev") != DEPS_REV:
+        return False
+    return (WHEELS_DIR / prior.get("wheel_filename", "")).is_file()
+
+
+def _verify_wheel_installs(apworld: str, wheel_path: Path) -> bool:
+    """Dry-run `uv pip install` the just-built wheel; failure is logged and
+    reported through the same failure-log path other build failures use.
+    """
+    uv = shutil.which("uv")
+    result = _uv_dry_run_install(str(wheel_path), uv)
+    if result is not None and result.returncode == 0:
+        return True
+    FAILURES_DIR.mkdir(parents=True, exist_ok=True)
+    detail = (
+        "uv pip install --dry-run timed out after 120s" if result is None else
+        f"--- stdout ---\n{result.stdout}\n\n--- stderr ---\n{result.stderr}"
+    )
+    (FAILURES_DIR / f"{apworld}.log").write_text(
+        f"--verify-deps: uv pip install --dry-run failed for {wheel_path.name}\n\n{detail}\n",
+        encoding="utf-8",
+    )
+    print(f"[fail] {apworld}: --verify-deps: wheel does not install cleanly")
+    return False
+
+
 def cmd_build(args: argparse.Namespace) -> int:
+    if args.verify_deps and shutil.which("uv") is None:
+        sys.exit("--verify-deps requires uv on PATH to dry-run install each built wheel.")
     STAGING.mkdir(parents=True, exist_ok=True)
     manifest = load_manifest()
     explicit = list(dict.fromkeys(args.worlds or []))  # de-dupe, preserve order
@@ -491,24 +641,10 @@ def cmd_build(args: argparse.Namespace) -> int:
 
     for i, (apworld, entry) in enumerate(entries.items(), 1):
         prior = manifest.get(apworld, {})
-        # Skip only when the prior entry was produced by the current shape_tree
-        # contract (i.e., has the `dependencies` and `components` fields).
-        # Legacy entries built before shape_tree learned to read
-        # requirements.txt / mirror component registrations are unconditionally
-        # rebuilt so the user can blanket-fix stale wheels by re-running
-        # `build` (no flags). `--force` still overrides every cache check.
-        if (
-            prior
-            and not prior.get("_skipped")
-            and not args.force
-            and "dependencies" in prior
-            and "components" in prior
-        ):
-            wheel_path = WHEELS_DIR / prior.get("wheel_filename", "")
-            if wheel_path.is_file():
-                print(f"[have] {apworld}: already built ({i}/{total})")
-                built += 1
-                continue
+        if _build_is_cached(prior, args.force):
+            print(f"[have] {apworld}: already built ({i}/{total})")
+            built += 1
+            continue
         print(f"--- {apworld} ({i}/{total}) ---")
         result = build_one(apworld, entry, prior_entry=prior)
         if result is None:
@@ -516,6 +652,10 @@ def cmd_build(args: argparse.Namespace) -> int:
         elif result.get("_skipped"):
             skipped += 1
             manifest[apworld] = result
+        elif args.verify_deps and not _verify_wheel_installs(
+            apworld, WHEELS_DIR / result["wheel_filename"]
+        ):
+            failed += 1
         else:
             built += 1
             manifest[apworld] = result
@@ -718,10 +858,17 @@ def cmd_rewrite_index(args: argparse.Namespace) -> int:
     try:
         import jsonschema  # type: ignore
     except ImportError:
-        subprocess.run(
-            [str(VENV_PYTHON), "-m", "pip", "install", "jsonschema"],
-            check=True, capture_output=True,
-        )
+        uv = shutil.which("uv")
+        if uv:
+            subprocess.run(
+                [uv, "pip", "install", "--python", str(VENV_PYTHON), "jsonschema"],
+                check=True, capture_output=True,
+            )
+        else:
+            subprocess.run(
+                [str(VENV_PYTHON), "-m", "pip", "install", "jsonschema"],
+                check=True, capture_output=True,
+            )
         import jsonschema  # type: ignore
 
     schema = json.loads(
@@ -798,6 +945,21 @@ def cmd_prune(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    # shape_tree.shape() runs in THIS interpreter (only `python -m build` uses
+    # VENV_PYTHON). Without tomli_w importable here, select_or_render_pyproject
+    # silently drops the [project.entry-points."mwgg.client"] launch hook (and
+    # version/author injection) - it only warns to stderr, yet still reports the
+    # entry points in its summary. The resulting wheels look fine but ship no hook,
+    # so the launcher falls back to the world's __init__ wrapper (e.g. albw's
+    # launch_subprocess), which double-spawns and opens a second GUI. Refuse to run
+    # rather than emit silently-broken wheels; .seed-venv ships tomli_w.
+    if not shape_tree._HAS_TOMLI_W:
+        sys.exit(
+            f"tomli_w is not importable in {sys.executable}, so shape_tree would "
+            "silently drop the mwgg.client launch hook from every client wheel. "
+            f"Re-run with the seed venv: {VENV_PYTHON}"
+        )
+
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -809,6 +971,11 @@ def main() -> int:
              "(takes precedence over --only)",
     )
     p_build.add_argument("--force", action="store_true", help="Rebuild even if manifest entry exists")
+    p_build.add_argument(
+        "--verify-deps", action="store_true",
+        help="After each build, dry-run `uv pip install` the wheel and fail the "
+             "world if it doesn't install cleanly. Requires uv on PATH.",
+    )
     p_build.set_defaults(func=cmd_build)
 
     p_upload = sub.add_parser(

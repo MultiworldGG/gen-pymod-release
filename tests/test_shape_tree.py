@@ -604,5 +604,23 @@ class ShapeComponentsTests(unittest.TestCase):
         self.assertIsNone(shape_info["components"])
 
 
+class ParseRequirementsTxtTests(unittest.TestCase):
+    def parse(self, text: str) -> list[str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "requirements.txt"
+            path.write_text(text, encoding="utf-8")
+            return shape_tree.parse_requirements_txt(path)
+
+    def test_direct_ref_with_mid_token_fragment_passes_through(self) -> None:
+        # kivymd/zillion/banjo_tooie shape: `#egg=` directly follows the commit
+        # sha with no preceding whitespace, so it's a URL fragment, not a comment.
+        line = "kivymd @ git+https://github.com/kivymd/KivyMD@5ff9d0d#egg=kivymd"
+        self.assertEqual(self.parse(line + "\n"), [line])
+
+    def test_bare_url_requirement_raises(self) -> None:
+        with self.assertRaises(SystemExit):
+            self.parse("git+https://github.com/foo/bar.git@main#egg=bar\n")
+
+
 if __name__ == "__main__":
     unittest.main()

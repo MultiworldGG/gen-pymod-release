@@ -752,6 +752,12 @@ def parse_requirements_txt(path: Path) -> list[str]:
         if not line:
             continue
         first_token = line.split(None, 1)[0]
+        if first_token.startswith(("http://", "https://", "file:", "git+")):
+            raise SystemExit(
+                f"::error::{path}: bare URL requirement {first_token!r} is not valid "
+                "PEP 508; rewrite it as `name @ <url>` so it can ship in the wheel "
+                "metadata."
+            )
         if first_token in _PIP_DIRECTIVE_FLAGS_SKIP:
             if first_token in _PIP_DIRECTIVE_FLAGS_WARN:
                 logging.warning(
@@ -893,11 +899,10 @@ def select_or_render_pyproject(
         try:
             data = tomllib.loads(rendered)
         except tomllib.TOMLDecodeError as exc:
-            logging.warning(
-                "Could not re-parse the rendered fallback pyproject.toml to inject "
-                "entry points / dependencies; the wheel may be missing them: %s", exc,
+            raise SystemExit(
+                f"::error::{apworld}: could not re-parse the rendered fallback "
+                f"pyproject.toml to inject entry points / dependencies: {exc}"
             )
-            return rendered
         _inject_entry_points(data)
         _inject_dependencies(data, caller_has_pyproject=False)
         return tomli_w.dumps(data)
