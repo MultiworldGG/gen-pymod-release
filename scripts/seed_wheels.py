@@ -123,12 +123,39 @@ IMPORT_NAME_MAP = {
 DEV_TOOL_IMPORTS = frozenset({"pytest", "PyInstaller"})
 
 
+# Handler types that make a `try: import x` optional rather than required.
+_IMPORT_GUARD_EXCEPTIONS = frozenset({"ImportError", "ModuleNotFoundError", "Exception", "BaseException"})
+
+
+def _catches_import_error(handler: ast.ExceptHandler) -> bool:
+    if handler.body and isinstance(handler.body[-1], ast.Raise):
+        return False  # catch-and-re-raise still makes the import required
+    if handler.type is None:
+        return True
+    types = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+    return any(isinstance(t, ast.Name) and t.id in _IMPORT_GUARD_EXCEPTIONS for t in types)
+
+
+def _guarded_import_ids(tree: ast.AST) -> set[int]:
+    """ids of every node inside a `try` body whose handlers catch ImportError."""
+    guarded: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Try, ast.TryStar)) and any(
+            _catches_import_error(h) for h in node.handlers
+        ):
+            for stmt in node.body:
+                guarded.update(id(n) for n in ast.walk(stmt))
+    return guarded
+
+
 def scan_imports(world_dir: Path) -> set[str]:
     """Return the top-level module names imported by any .py file under world_dir.
 
     Only the first segment is kept (so `import bsdiff4.foo` yields `bsdiff4`).
-    Relative imports are ignored. Files that fail to parse are skipped with a
-    warning - one un-parseable file shouldn't drop the whole world's deps.
+    Relative imports are ignored, as are imports inside a `try` whose handlers
+    catch ImportError - the world already tolerates their absence. Files that
+    fail to parse are skipped with a warning - one un-parseable file shouldn't
+    drop the whole world's deps.
     """
     found: set[str] = set()
     for py in world_dir.rglob("*.py"):
@@ -137,7 +164,10 @@ def scan_imports(world_dir: Path) -> set[str]:
         except (SyntaxError, ValueError) as e:
             print(f"[warn] scan_imports: skipping {py.relative_to(world_dir)}: {e}")
             continue
+        guarded = _guarded_import_ids(tree)
         for node in ast.walk(tree):
+            if id(node) in guarded:
+                continue
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     found.add(alias.name.split(".", 1)[0])

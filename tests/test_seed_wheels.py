@@ -122,6 +122,59 @@ class DetectThirdPartyDepsTests(unittest.TestCase):
             """)
             self.assertEqual(seed_wheels.detect_third_party_deps("demo", world_dir), [])
 
+    def test_imports_guarded_by_import_error_are_optional(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            world_dir = write_world(tmp, "demo", """
+                try:
+                    import RaceRom
+                except ImportError:
+                    RaceRom = None
+                try:
+                    from optional_pkg import thing
+                except (OSError, ModuleNotFoundError):
+                    thing = None
+                try:
+                    import bare_pkg
+                except:
+                    pass
+                try:
+                    import broad_pkg
+                except Exception:
+                    pass
+
+                def f():
+                    try:
+                        import nested_pkg
+                    except ImportError:
+                        return None
+            """)
+            self.assertEqual(seed_wheels.detect_third_party_deps("demo", world_dir), [])
+
+    def test_imports_guarded_by_other_exceptions_stay_required(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            world_dir = write_world(tmp, "demo", """
+                try:
+                    import required_pkg
+                except ValueError:
+                    pass
+                try:
+                    pass
+                except ImportError:
+                    import in_handler_pkg
+                else:
+                    import in_else_pkg
+                finally:
+                    import in_finally_pkg
+                try:
+                    import reraised_pkg
+                except ImportError as e:
+                    raise ImportError("install reraised_pkg") from e
+            """)
+            self.assertEqual(
+                seed_wheels.detect_third_party_deps("demo", world_dir),
+                ["in_else_pkg", "in_finally_pkg", "in_handler_pkg", "required_pkg", "reraised_pkg"],
+            )
+
 
 class HostProvidedParsingTests(unittest.TestCase):
     # _host_provided_dists reuses shape_tree.parse_requirements_txt +
