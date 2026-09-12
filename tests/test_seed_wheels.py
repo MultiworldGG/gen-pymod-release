@@ -248,5 +248,59 @@ class BuildIsCachedTests(unittest.TestCase):
                 self.assertFalse(seed_wheels._build_is_cached(prior, force=True))
 
 
+class MergeWorldMetadataTests(unittest.TestCase):
+    def test_archipelago_json_wins_over_index(self) -> None:
+        merged = seed_wheels.merge_world_metadata(
+            "demo",
+            {"game": "Demo", "world_version": "2.0.0", "authors": ["a"], "extra": 1},
+            {"game": "Other", "world_version": "1.0.0", "authors": ["b"]},
+        )
+        self.assertEqual(merged["world_version"], "2.0.0")
+        self.assertEqual(merged["game"], "Demo")
+        self.assertEqual(merged["authors"], ["a"])
+        self.assertEqual(merged["extra"], 1)
+
+    def test_index_fills_missing_world_version(self) -> None:
+        merged = seed_wheels.merge_world_metadata(
+            "demo", {"game": "Demo"}, {"world_version": "1.0.0"}
+        )
+        self.assertEqual(merged["world_version"], "1.0.0")
+
+    def test_undeclared_world_version_defaults(self) -> None:
+        for existing in ({}, {"world_version": ""}, {"world_version": "  "}):
+            with self.subTest(existing=existing):
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    merged = seed_wheels.merge_world_metadata("demo", existing, {})
+                self.assertEqual(merged["world_version"], seed_wheels.DEFAULT_WORLD_VERSION)
+                self.assertEqual(merged["game"], "demo")
+                self.assertIn("[info] demo: no world_version declared", buf.getvalue())
+
+
+class UvDryRunInstallTests(unittest.TestCase):
+    def test_targets_build_python_by_absolute_path(self) -> None:
+        # CI sets SEED_BUILD_PYTHON=python with no venv active; uv refuses both
+        # a bare name and a missing --python there, failing every world.
+        resolved = str(Path(tempfile.gettempdir()) / "python.exe")
+        with (
+            mock.patch.object(seed_wheels, "VENV_PYTHON", Path("python")),
+            mock.patch.object(seed_wheels.shutil, "which", return_value=resolved) as which,
+            mock.patch.object(seed_wheels.subprocess, "run") as run,
+        ):
+            seed_wheels._uv_dry_run_install("demo.whl", "uv")
+        which.assert_called_once_with("python")
+        cmd = run.call_args.args[0]
+        self.assertEqual(cmd[:2], ["uv", "pip"])
+        self.assertEqual(cmd[cmd.index("--python") + 1], resolved)
+        self.assertEqual(cmd[-1], "demo.whl")
+
+    def test_unresolvable_interpreter_falls_through_to_uv(self) -> None:
+        with (
+            mock.patch.object(seed_wheels, "VENV_PYTHON", Path("missing-python")),
+            mock.patch.object(seed_wheels.shutil, "which", return_value=None),
+        ):
+            self.assertEqual(seed_wheels._build_python(), "missing-python")
+
+
 if __name__ == "__main__":
     unittest.main()

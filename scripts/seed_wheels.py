@@ -302,11 +302,19 @@ def _host_provided_dists() -> frozenset[str]:
 _RESOLVE_CACHE: dict[str, bool] = {}
 
 
+def _build_python() -> str:
+    """VENV_PYTHON as an absolute path: uv's --python rejects a bare name such as
+    `python` (CI's SEED_BUILD_PYTHON) when no virtualenv is active.
+    """
+    return shutil.which(str(VENV_PYTHON)) or str(VENV_PYTHON)
+
+
 def _uv_dry_run_install(target: str, uv: str) -> Optional[subprocess.CompletedProcess]:
     """Run `uv pip install --dry-run` against `target`; None on timeout."""
     try:
         return subprocess.run(
-            [uv, "pip", "install", "--dry-run", "--no-config", target],
+            [uv, "pip", "install", "--dry-run", "--no-config",
+             "--python", _build_python(), target],
             capture_output=True, text=True, timeout=120,
         )
     except subprocess.TimeoutExpired:
@@ -431,6 +439,27 @@ def _load_override(apworld: str):
     return module
 
 
+DEFAULT_WORLD_VERSION = "0.0.1"
+
+
+def merge_world_metadata(apworld: str, existing: dict, index_entry: dict) -> dict:
+    """archipelago.json fields win, the Index fills gaps, and a world that has
+    not declared a world_version yet builds as DEFAULT_WORLD_VERSION.
+    """
+    merged = {
+        "game": existing.get("game") or index_entry.get("game", apworld),
+        "world_version": existing.get("world_version") or index_entry.get("world_version"),
+        "authors": existing.get("authors") or index_entry.get("authors", []),
+    }
+    for k, v in existing.items():
+        if k not in merged:
+            merged[k] = v
+    if not str(merged["world_version"] or "").strip():
+        print(f"[info] {apworld}: no world_version declared; defaulting to {DEFAULT_WORLD_VERSION}")
+        merged["world_version"] = DEFAULT_WORLD_VERSION
+    return merged
+
+
 def build_one(apworld: str, index_entry: dict, prior_entry: Optional[dict] = None) -> Optional[dict]:
     """Build a single world's wheel. Return manifest entry or None on failure/skip.
 
@@ -452,18 +481,7 @@ def build_one(apworld: str, index_entry: dict, prior_entry: Optional[dict] = Non
     else:
         existing = {}
 
-    # Merge: prefer existing archipelago.json fields; fall back to Index for any missing.
-    merged = {
-        "game": existing.get("game") or index_entry.get("game", apworld),
-        "world_version": existing.get("world_version") or index_entry.get("world_version"),
-        "authors": existing.get("authors") or index_entry.get("authors", []),
-    }
-    for k, v in existing.items():
-        if k not in merged:
-            merged[k] = v
-    if not merged["world_version"]:
-        print(f"[skip] {apworld}: no world_version in either archipelago.json or Index entry")
-        return {"_skipped": True, "reason": "no world_version available"}
+    merged = merge_world_metadata(apworld, existing, index_entry)
 
     needs_write = (
         original_bytes is None
@@ -657,7 +675,7 @@ def cmd_build(args: argparse.Namespace) -> int:
     if explicit:
         # Source-driven: build exactly these worlds straight from worlds/<name>/,
         # with no Index lookup. Metadata comes from each world's archipelago.json
-        # (build_one falls back to {} and skips any world lacking a world_version).
+        # (build_one falls back to {}; a missing world_version defaults to 0.0.1).
         entries = {name: {} for name in explicit}
     else:
         entries = discover_index_entries()
@@ -891,7 +909,7 @@ def cmd_rewrite_index(args: argparse.Namespace) -> int:
         uv = shutil.which("uv")
         if uv:
             subprocess.run(
-                [uv, "pip", "install", "--python", str(VENV_PYTHON), "jsonschema"],
+                [uv, "pip", "install", "--python", _build_python(), "jsonschema"],
                 check=True, capture_output=True,
             )
         else:

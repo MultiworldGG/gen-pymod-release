@@ -145,6 +145,12 @@ jobs:
           SCRIPT="${GITHUB_WORKSPACE}/gen-pymod-release/scripts/seed_wheels.py"
           python "$SCRIPT" build --worlds $WORLDS --verify-deps
           BUILD_RC=$?
+          for f in "${SEED_STAGING}"/failures/*.log; do
+            [ -e "$f" ] || continue
+            echo "::group::failure: $(basename "$f" .log)"
+            cat "$f"
+            echo "::endgroup::"
+          done
           python "$SCRIPT" upload --only $WORLDS ${{ inputs.dry-run && '--dry-run' || '' }}
           UPLOAD_RC=$?
           echo "build rc=$BUILD_RC  upload rc=$UPLOAD_RC"
