@@ -302,5 +302,31 @@ class UvDryRunInstallTests(unittest.TestCase):
             self.assertEqual(seed_wheels._build_python(), "missing-python")
 
 
+class RestoreOverrideFilesTests(unittest.TestCase):
+    def test_created_files_and_emptied_dirs_are_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            world_dir = Path(tmp)
+            (world_dir / "vendored").mkdir()
+            (world_dir / "vendored" / "a.py").write_bytes(b"a")
+            (world_dir / "vendored" / "b.py").write_bytes(b"b")
+            seed_wheels._restore_override_files(
+                world_dir, {"vendored/a.py": None, "vendored/b.py": None, "never_made.py": None}
+            )
+            self.assertEqual(list(world_dir.iterdir()), [])
+
+    def test_changed_files_are_restored_and_shared_dirs_kept(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            world_dir = Path(tmp)
+            (world_dir / "sub").mkdir()
+            (world_dir / "sub" / "keep.py").write_bytes(b"keep")
+            (world_dir / "sub" / "made.py").write_bytes(b"made")
+            (world_dir / "__init__.py").write_bytes(b"patched")
+            seed_wheels._restore_override_files(
+                world_dir, {"__init__.py": b"original", "sub/made.py": None}
+            )
+            self.assertEqual((world_dir / "__init__.py").read_bytes(), b"original")
+            self.assertEqual([p.name for p in (world_dir / "sub").iterdir()], ["keep.py"])
+
+
 if __name__ == "__main__":
     unittest.main()

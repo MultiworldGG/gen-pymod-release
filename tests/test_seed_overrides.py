@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import sys
 import tempfile
@@ -113,6 +114,62 @@ class PaperMarioOverrideTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(FileNotFoundError):
                 self.override.apply(Path(tmp))
+
+
+ID1_WORLDS = ("doom_1993_beta", "doom_ii_beta", "heretic_beta")
+ID1_FILES = {
+    "__init__.py": b"from .options import Episode\n",
+    "options.py": b"class Episode: ...\n",
+    "LICENSE": b"zlib\n",
+}
+
+
+def make_id1_worlds_tree(tmp: str, apworld: str) -> Path:
+    library = Path(tmp) / "worlds" / "_id1common"
+    library.mkdir(parents=True)
+    for name, data in ID1_FILES.items():
+        (library / name).write_bytes(data)
+    (library / "README.md").write_bytes(b"# id1Common\n")
+    world_dir = library.parent / apworld
+    world_dir.mkdir()
+    return world_dir
+
+
+class Id1CommonOverrideTests(unittest.TestCase):
+    def test_every_id1_world_shares_the_vendor_contract(self) -> None:
+        for apworld in ID1_WORLDS:
+            with self.subTest(apworld=apworld):
+                override = load_override(apworld)
+                self.assertEqual(override.TOUCHES, [f"id1common/{name}" for name in ID1_FILES])
+
+    def test_apply_vendors_library_as_importable_package(self) -> None:
+        override = load_override("doom_1993_beta")
+        with tempfile.TemporaryDirectory() as tmp:
+            world_dir = make_id1_worlds_tree(tmp, "doom_1993_beta")
+            changes = override.apply(world_dir)
+            self.assertEqual(len(changes), len(ID1_FILES))
+            vendored = world_dir / "id1common"
+            self.assertEqual(sorted(p.name for p in vendored.iterdir()), sorted(ID1_FILES))
+            for name, data in ID1_FILES.items():
+                self.assertEqual((vendored / name).read_bytes(), data)
+
+            sys.path.insert(0, tmp)
+            try:
+                module = importlib.import_module("worlds.doom_1993_beta.id1common")
+                self.assertTrue(hasattr(module, "Episode"))
+            finally:
+                sys.path.remove(tmp)
+                for name in [n for n in sys.modules if n == "worlds" or n.startswith("worlds.")]:
+                    del sys.modules[name]
+
+    def test_missing_library_raises_before_writing(self) -> None:
+        override = load_override("heretic_beta")
+        with tempfile.TemporaryDirectory() as tmp:
+            world_dir = Path(tmp) / "worlds" / "heretic_beta"
+            world_dir.mkdir(parents=True)
+            with self.assertRaises(FileNotFoundError):
+                override.apply(world_dir)
+            self.assertFalse((world_dir / "id1common").exists())
 
 
 if __name__ == "__main__":
