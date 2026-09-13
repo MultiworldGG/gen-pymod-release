@@ -854,9 +854,13 @@ def cmd_upload(args: argparse.Namespace) -> int:
     # wakes Oliver to open the Index PR) fires exactly ONCE, after every wheel is
     # attached and verified. Idempotent: --draft=false on an already-published
     # release is a no-op, so a re-run that left a draft behind still publishes it.
+    # --latest=false must ride the publishing edit: make_latest is decided when the
+    # draft flips to published and defaults to true, which would steal
+    # /releases/latest from the app release cut on the same commit.
     print(f"Publishing release {RELEASE_TAG}...")
     publish = subprocess.run(
-        ["gh", "release", "edit", RELEASE_TAG, "--repo", RELEASE_REPO, "--draft=false"],
+        ["gh", "release", "edit", RELEASE_TAG, "--repo", RELEASE_REPO,
+         "--draft=false", "--latest=false"],
         text=True,
     )
     if publish.returncode != 0:
