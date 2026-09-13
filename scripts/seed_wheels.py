@@ -425,7 +425,7 @@ def discover_index_entries() -> dict[str, dict]:
 
 
 def _load_override(apworld: str):
-    """Load tools/seed_overrides/<apworld>/override.py, or None if absent.
+    """Load <SEED_OVERRIDES_DIR>/<apworld>/override.py, or None if absent.
 
     The module must expose `TOUCHES: list[str]` (files it reads/creates,
     relative to the world dir) and `apply(world_dir) -> list[str]`.
@@ -437,6 +437,22 @@ def _load_override(apworld: str):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _restore_override_files(world_dir: Path, backup: dict[str, Optional[bytes]]) -> None:
+    """Put back every TOUCHES file the override changed and delete the ones it
+    created, along with any directories that leaves empty."""
+    for rel, original in backup.items():
+        p = world_dir / rel
+        if original is not None:
+            p.write_bytes(original)
+            continue
+        if p.is_file():
+            p.unlink()
+        for parent in p.parents:
+            if parent == world_dir or not parent.is_dir() or any(parent.iterdir()):
+                break
+            parent.rmdir()
 
 
 DEFAULT_WORLD_VERSION = "0.0.1"
@@ -619,13 +635,7 @@ def build_one(apworld: str, index_entry: dict, prior_entry: Optional[dict] = Non
             archipelago_json_path.write_bytes(original_bytes)
         if generated_requirements_written and requirements_path.is_file():
             requirements_path.unlink()
-        for rel, original in override_backup.items():
-            p = world_dir / rel
-            if original is None:
-                if p.is_file():
-                    p.unlink()
-            else:
-                p.write_bytes(original)
+        _restore_override_files(world_dir, override_backup)
 
 
 def _build_is_cached(prior: dict, force: bool) -> bool:
