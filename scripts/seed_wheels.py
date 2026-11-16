@@ -56,7 +56,7 @@ VENV_PYTHON = Path(
 )
 STAGING = Path(os.environ.get("SEED_STAGING") or (MAIN_REPO / "tools" / ".seed-staging"))
 WHEELS_DIR = STAGING / "wheels"
-# Per-world build-time source patches (e.g. dk64 ROM-path redirect). Each lives
+# Per-world build-time source patches (e.g. papermario rescout dedupe). Each lives
 # at <SEED_OVERRIDES_DIR>/<apworld>/override.py. Applied transiently before
 # shape_tree.shape() and restored afterwards - see build_one. Defaults to the copy
 # vendored alongside this script in gen-pymod-release.
@@ -515,7 +515,7 @@ def build_one(apworld: str, index_entry: dict, prior_entry: Optional[dict] = Non
     else:
         source = "archipelago.json"
 
-    # Per-world source patches (e.g. dk64 ROM-path redirect). Loaded early so its
+    # Per-world source patches (e.g. papermario rescout dedupe). Loaded early so its
     # IGNORE_IMPORTS feeds the dependency scan; applied (and restored) below.
     override = _load_override(apworld)
     ignore_imports = frozenset(getattr(override, "IGNORE_IMPORTS", []) if override else [])
